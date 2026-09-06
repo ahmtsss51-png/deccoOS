@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Veri Aktarımı — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .drop-zone {
+      border: 2px dashed var(--border); border-radius: var(--radius);
+      padding: 40px; text-align: center; cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    .drop-zone:hover, .drop-zone.dragging {
+      border-color: var(--primary); background: rgba(34,197,94,.05);
+    }
+    .drop-icon { font-size: 2rem; margin-bottom: 8px; }
+    .import-step { display: none; }
+    .import-step.active { display: block; }
+    .preview-scroll { max-height: 260px; overflow-y: auto; }
+    .mapping-row { display: grid; grid-template-columns: 1fr 24px 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .arrow { color: var(--text-secondary); text-align: center; }
+    .result-box { background: var(--surface-2); border-radius: var(--radius); padding: 16px; }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Veri Aktarımı</h1><p style="color:var(--text-secondary);font-size:.85rem;margin-top:4px">Excel'den kaydettiğiniz CSV dosyalarını sisteme aktarın</p></div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:220px 1fr;gap:20px">
+    <!-- Sidebar -->
+    <div>
+      <div class="card" style="padding:8px">
+        <div style="font-size:.75rem;font-weight:600;color:var(--text-secondary);padding:8px 8px 4px">VERİ TİPİ</div>
+        <button class="filter-tab active" data-entity="customers" style="width:100%;text-align:left;padding:8px 12px;margin-bottom:2px">👤 Müşteriler</button>
+        <button class="filter-tab" data-entity="materials" style="width:100%;text-align:left;padding:8px 12px;margin-bottom:2px">🧵 Malzemeler</button>
+        <button class="filter-tab" data-entity="products" style="width:100%;text-align:left;padding:8px 12px;margin-bottom:2px">🎒 Ürünler</button>
+      </div>
+
+      <!-- Format rehberi -->
+      <div class="card" style="margin-top:12px;padding:14px">
+        <div class="section-title" style="margin-bottom:8px">Beklenen Kolonlar</div>
+        <div id="format-guide" style="font-size:.78rem;color:var(--text-secondary);line-height:1.6"></div>
+      </div>
+    </div>
+
+    <!-- Ana alan -->
+    <div class="card">
+      <!-- Adım 1: Dosya yükle -->
+      <div class="import-step active" id="step-upload">
+        <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+          <div class="drop-icon">📂</div>
+          <div style="font-size:1rem;font-weight:600;margin-bottom:4px">CSV dosyasını sürükleyin veya tıklayın</div>
+          <div style="font-size:.82rem;color:var(--text-secondary)">Excel'den "CSV (UTF-8)" olarak kaydedin</div>
+        </div>
+        <input type="file" id="file-input" accept=".csv" style="display:none" onchange="handleFile(this.files[0])"/>
+      </div>
+
+      <!-- Adım 2: Önizleme & Eşleştirme -->
+      <div class="import-step" id="step-preview">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="section-title" style="margin:0">Önizleme <span id="row-count" style="color:var(--text-secondary);font-size:.8rem"></span></div>
+          <button class="btn btn-secondary btn-sm" onclick="reset()">← Yeni Dosya</button>
+        </div>
+
+        <div class="preview-scroll" style="margin-bottom:16px">
+          <div class="table-wrap"><table id="preview-table"></table></div>
+        </div>
+
+        <div class="section-title" style="margin-bottom:8px">Alan Eşleştirme</div>
+        <div id="mapping-area" style="margin-bottom:16px"></div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-secondary" onclick="reset()">İptal</button>
+          <button class="btn btn-primary" id="import-btn" onclick="doImport()">İçe Aktar</button>
+        </div>
+      </div>
+
+      <!-- Adım 3: Sonuç -->
+      <div class="import-step" id="step-result">
+        <div class="result-box" id="result-content"></div>
+        <div style="text-align:center;margin-top:16px">
+          <button class="btn btn-primary" onclick="reset()">Yeni Aktarım</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, toast, renderSidebar } from '/js/shared.js'
+renderSidebar('import')
+
+const entityConfig = {
+  customers: {
+    label: 'Müşteri',
+    fields: ['name','phone','channel','notes'],
+    required: ['name'],
+    guide: 'name (zorunlu), phone, channel (whatsapp/instagram/web/direct), notes'
+  },
+  materials: {
+    label: 'Malzeme',
+    fields: ['sku','name','material_type','family','color','unit','reorder_level'],
+    required: ['sku','name'],
+    guide: 'sku (zorunlu), name (zorunlu), material_type (leather/thread/adhesive/accessory/packaging), family, color, unit (desi/adet/ml/m), reorder_level'
+  },
+  products: {
+    label: 'Ürün',
+    fields: ['code','name','category','base_price'],
+    required: ['code','name'],
+    guide: 'code (zorunlu), name (zorunlu), category, base_price'
+  }
+}
+
+let activeEntity = 'customers'
+let csvRows = []
+let csvHeaders = []
+
+document.querySelectorAll('[data-entity]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-entity]').forEach(b=>b.classList.remove('active'))
+    btn.classList.add('active')
+    activeEntity = btn.dataset.entity
+    updateGuide()
+    reset()
+  })
+})
+
+function updateGuide() {
+  document.getElementById('format-guide').textContent = entityConfig[activeEntity].guide
+}
+updateGuide()
+
+// Drag & drop
+const dz = document.getElementById('drop-zone')
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragging') })
+dz.addEventListener('dragleave', () => dz.classList.remove('dragging'))
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('dragging'); handleFile(e.dataTransfer.files[0]) })
+
+window.handleFile = (file) => {
+  if (!file || !file.name.endsWith('.csv')) { toast('Lütfen .csv dosyası seçin','error'); return }
+  const reader = new FileReader()
+  reader.onload = e => parseCSV(e.target.result)
+  reader.readAsText(file, 'UTF-8')
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n').map(l => l.split(',').map(c => c.trim().replace(/^"|"$/g,'')))
+  csvHeaders = lines[0]
+  csvRows = lines.slice(1).filter(r => r.some(c=>c))
+  showPreview()
+}
+
+function showPreview() {
+  showStep('step-preview')
+  document.getElementById('row-count').textContent = `(${csvRows.length} satır)`
+
+  // Preview table
+  const preview = csvRows.slice(0,5)
+  const table = document.getElementById('preview-table')
+  table.innerHTML = `<thead><tr>${csvHeaders.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${preview.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>`
+
+  // Mapping
+  const cfg = entityConfig[activeEntity]
+  const area = document.getElementById('mapping-area')
+  area.innerHTML = cfg.fields.map(field => {
+    const guessed = csvHeaders.findIndex(h => h.toLowerCase().replace(/\s/g,'_') === field || h.toLowerCase() === field)
+    return `<div class="mapping-row">
+      <select class="form-control" id="map-${field}">
+        <option value="">— boş bırak —</option>
+        ${csvHeaders.map((h,i)=>`<option value="${i}" ${i===guessed?'selected':''}>${h}</option>`).join('')}
+      </select>
+      <div class="arrow">→</div>
+      <div style="font-size:.82rem;padding:6px;color:${cfg.required.includes(field)?'var(--primary)':'var(--text-secondary)'}">${field}${cfg.required.includes(field)?'*':''}</div>
+    </div>`
+  }).join('')
+}
+
+window.doImport = async () => {
+  const cfg = entityConfig[activeEntity]
+  const btn = document.getElementById('import-btn')
+  btn.disabled = true; btn.textContent = 'Aktarılıyor...'
+
+  const mapping = {}
+  cfg.fields.forEach(f => {
+    const sel = document.getElementById(`map-${f}`)
+    if (sel.value !== '') mapping[f] = parseInt(sel.value)
+  })
+
+  const missing = cfg.required.filter(f => mapping[f] === undefined)
+  if (missing.length) {
+    toast(`Zorunlu alanlar eksik: ${missing.join(', ')}`, 'error')
+    btn.disabled = false; btn.textContent = 'İçe Aktar'
+    return
+  }
+
+  const records = csvRows.map(row => {
+    const obj = {}
+    cfg.fields.forEach(f => { if (mapping[f] !== undefined) obj[f] = row[mapping[f]] || null })
+    return obj
+  }).filter(r => cfg.required.every(f => r[f]))
+
+  try {
+    const result = await api(`/import/${activeEntity}`, { method:'POST', body: { records } })
+    showStep('step-result')
+    document.getElementById('result-content').innerHTML = `
+      <div style="text-align:center;padding:16px">
+        <div style="font-size:2rem;margin-bottom:8px">✅</div>
+        <div style="font-size:1.1rem;font-weight:600;margin-bottom:4px">${cfg.label} aktarımı tamamlandı</div>
+        <div style="color:var(--text-secondary)">${result.inserted||0} eklendi · ${result.skipped||0} atlandı</div>
+      </div>`
+  } catch(e) {
+    toast(e.message, 'error')
+    btn.disabled = false; btn.textContent = 'İçe Aktar'
+  }
+}
+
+function showStep(id) {
+  document.querySelectorAll('.import-step').forEach(s=>s.classList.remove('active'))
+  document.getElementById(id).classList.add('active')
+}
+
+window.reset = () => {
+  csvRows = []; csvHeaders = []
+  document.getElementById('file-input').value = ''
+  showStep('step-upload')
+}
+</script>
+</body>
+</html>

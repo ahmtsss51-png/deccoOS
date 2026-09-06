@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Dashboard — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .subtitle { font-size: .82rem; color: var(--text-secondary); margin-top: 4px; }
+    .date-badge {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 6px 12px;
+      font-size: .78rem; color: var(--text-secondary);
+    }
+    .accent-yellow { border-top: 2px solid var(--yellow); }
+    .accent-blue   { border-top: 2px solid var(--blue); }
+    .accent-green  { border-top: 2px solid var(--green); }
+    .accent-red    { border-top: 2px solid var(--red); }
+    .accent-purple { border-top: 2px solid var(--purple); }
+
+    .progress-row { display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .progress-label { font-size: .8rem; color: var(--text-secondary); }
+    .progress-count { font-size: .85rem; font-variant-numeric: tabular-nums; }
+
+    .job-list { display: flex; flex-direction: column; gap: 8px; }
+    .job-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; background: var(--surface-2); border-radius: var(--radius); }
+    .job-item .job-code { font-size: .68rem; font-weight: 700; color: var(--text-secondary); font-family: monospace; }
+    .job-info { flex: 1; min-width: 0; }
+    .job-name { font-size: .85rem; font-weight: 600; }
+    .job-detail { font-size: .75rem; color: var(--text-secondary); margin-top: 2px; }
+
+    .skeleton { background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%);
+      background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 4px; color: transparent !important; }
+    @keyframes shimmer { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
+    .skel-value { min-height: 1.6rem; }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div>
+      <h1>Dashboard</h1>
+      <div class="subtitle" id="daily-summary">Yükleniyor...</div>
+    </div>
+    <div class="date-badge" id="today-date"></div>
+  </div>
+
+  <!-- SİPARİŞ DURUMU -->
+  <div class="section-title">Sipariş Durumu</div>
+  <div class="card-grid grid-4">
+    <div class="card kpi-card accent-yellow">
+      <div class="kpi-icon" style="background:var(--yellow-bg)">⏳</div>
+      <div class="kpi-label">Üretim Bekliyor</div>
+      <div class="kpi-value skeleton skel-value" id="val-waiting">&nbsp;</div>
+      <div class="kpi-sub">sipariş</div>
+    </div>
+    <div class="card kpi-card accent-blue">
+      <div class="kpi-icon" style="background:var(--blue-bg)">🔨</div>
+      <div class="kpi-label">Üretimde</div>
+      <div class="kpi-value skeleton skel-value" id="val-production">&nbsp;</div>
+      <div class="kpi-sub">sipariş</div>
+    </div>
+    <div class="card kpi-card accent-green">
+      <div class="kpi-icon" style="background:var(--green-bg)">✅</div>
+      <div class="kpi-label">Hazır / Kargoya Hazır</div>
+      <div class="kpi-value skeleton skel-value" id="val-ready">&nbsp;</div>
+      <div class="kpi-sub">sipariş</div>
+    </div>
+    <div class="card kpi-card accent-red" id="card-overdue">
+      <div class="kpi-icon" style="background:var(--red-bg)">🚨</div>
+      <div class="kpi-label">Geciken</div>
+      <div class="kpi-value skeleton skel-value" id="val-overdue">&nbsp;</div>
+      <div class="kpi-sub">sipariş</div>
+    </div>
+  </div>
+
+  <!-- FİNANS + STOK -->
+  <div class="card-grid grid-4">
+    <div class="card kpi-card accent-green">
+      <div class="kpi-icon" style="background:var(--green-bg)">💵</div>
+      <div class="kpi-label">Kasa / Banka</div>
+      <div class="kpi-value sm skeleton skel-value" id="val-cash">&nbsp;</div>
+      <div class="kpi-sub">kullanılabilir</div>
+    </div>
+    <div class="card kpi-card accent-blue">
+      <div class="kpi-icon" style="background:var(--blue-bg)">📥</div>
+      <div class="kpi-label">Müşteri Alacağı</div>
+      <div class="kpi-value sm skeleton skel-value" id="val-receivable">&nbsp;</div>
+      <div class="kpi-sub">tahsil edilmedi</div>
+    </div>
+    <div class="card kpi-card accent-red">
+      <div class="kpi-icon" style="background:var(--red-bg)">📤</div>
+      <div class="kpi-label">Tedarikçi Borcu</div>
+      <div class="kpi-value sm skeleton skel-value" id="val-payable">&nbsp;</div>
+      <div class="kpi-sub">ödenecek</div>
+    </div>
+    <div class="card kpi-card accent-purple">
+      <div class="kpi-icon" style="background:var(--purple-bg)">📦</div>
+      <div class="kpi-label">Hazır Ürün Adedi</div>
+      <div class="kpi-value skeleton skel-value" id="val-finished">&nbsp;</div>
+      <div class="kpi-sub">adet stokta</div>
+    </div>
+  </div>
+
+  <!-- BU AY + STOK DURUMU -->
+  <div class="card-grid grid-3">
+    <div class="card">
+      <div class="section-title">Bu Ay</div>
+      <div style="margin-top:8px">
+        <div class="progress-row">
+          <span class="progress-label">Tahsilat</span>
+          <div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-income" style="width:0%;background:var(--green)"></div></div>
+          <span class="progress-count money-pos" id="val-income">—</span>
+        </div>
+        <div class="progress-row">
+          <span class="progress-label">Gider</span>
+          <div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-expense" style="width:0%;background:var(--red)"></div></div>
+          <span class="progress-count money-neg" id="val-expense">—</span>
+        </div>
+        <div class="progress-row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+          <span class="progress-label" style="font-weight:600;color:var(--text)">Yaklaşık Kâr</span>
+          <div></div>
+          <span class="progress-count td-bold" id="val-profit">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column: span 2">
+      <div class="section-title">Stok Durumu</div>
+      <div style="display:flex;gap:36px;margin-top:8px;flex-wrap:wrap">
+        <div>
+          <div class="kpi-label">Ham Madde Değeri</div>
+          <div class="kpi-value sm" id="val-rawstock">—</div>
+        </div>
+        <div>
+          <div class="kpi-label">Rezerve Stok</div>
+          <div class="kpi-value sm" id="val-reserved">—</div>
+        </div>
+        <div>
+          <div class="kpi-label">Kritik Stok</div>
+          <div class="kpi-value sm" id="val-lowstock">—</div>
+          <div class="kpi-sub">malzeme uyarı</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SON SİPARİŞLER + ÜRETİM KUYRUĞU -->
+  <div class="card-grid grid-2-1">
+    <div class="card">
+      <div class="section-title" style="margin-bottom:14px">Son Siparişler</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Müşteri</th><th>Tutar</th><th>Kalan</th><th>Durum</th></tr>
+          </thead>
+          <tbody id="recent-orders-body">
+            <tr><td colspan="5" class="td-muted" style="text-align:center;padding:20px">Yükleniyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title" style="margin-bottom:14px">Üretim Kuyruğu</div>
+      <div class="job-list" id="job-list">
+        <div class="td-muted" style="text-align:center;padding:20px">Yükleniyor...</div>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, chip, renderSidebar } from '/js/shared.js'
+renderSidebar('dashboard')
+
+document.getElementById('today-date').textContent =
+  new Date().toLocaleDateString('tr-TR', { weekday:'long', day:'numeric', month:'long', year:'numeric' })
+
+const jobChip = s => {
+  const map = { pending:['chip-yellow','Bekliyor'], in_progress:['chip-blue','Üretimde'], quality_check:['chip-purple','Kontrol'] }
+  const [cls, label] = map[s] || ['chip-gray', s]
+  return `<span class="chip ${cls}">${label}</span>`
+}
+
+function setVal(id, val) {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.classList.remove('skeleton','skel-value')
+  el.textContent = val
+}
+
+async function loadDashboard() {
+  try {
+    const d = await api('/dashboard')
+
+    const o = d.orders
+    setVal('val-waiting', o.waiting_production || '0')
+    setVal('val-production', o.in_production || '0')
+    setVal('val-ready', o.ready || '0')
+    setVal('val-overdue', o.overdue || '0')
+    if (parseInt(o.overdue) > 0) document.getElementById('card-overdue').style.borderColor = 'var(--red)'
+
+    const f = d.finance
+    setVal('val-cash', money(f.available_cash))
+    setVal('val-receivable', money(f.customer_receivable))
+    setVal('val-payable', money(f.supplier_payable))
+
+    const income = parseFloat(f.this_month_income) || 0
+    const expense = parseFloat(f.this_month_expense) || 0
+    const profit = income - expense
+    const max = Math.max(income, expense, 1)
+    document.getElementById('val-income').textContent = money(income)
+    document.getElementById('val-expense').textContent = money(expense)
+    const pEl = document.getElementById('val-profit')
+    pEl.textContent = money(profit)
+    pEl.className = `progress-count td-bold ${profit >= 0 ? 'money-pos' : 'money-neg'}`
+    document.getElementById('bar-income').style.width = (income / max * 100) + '%'
+    document.getElementById('bar-expense').style.width = (expense / max * 100) + '%'
+
+    const s = d.stock
+    setVal('val-finished', s.finished_product_count || '0')
+    document.getElementById('val-rawstock').textContent = money(s.raw_stock_value)
+    document.getElementById('val-reserved').textContent = (parseFloat(s.reserved_stock_total) || 0).toFixed(1) + ' desi'
+    document.getElementById('val-lowstock').textContent = s.low_stock_count || '0'
+
+    document.getElementById('daily-summary').textContent =
+      `${o.waiting_production || 0} sipariş üretim bekliyor, ${o.in_production || 0} üretimde, ${o.ready || 0} hazır`
+
+    const tbody = document.getElementById('recent-orders-body')
+    tbody.innerHTML = d.recent_orders.length
+      ? d.recent_orders.map(r => {
+          const kalan = parseFloat(r.total_amount) - parseFloat(r.paid_amount)
+          return `<tr onclick="location.href='/orders.html'" style="cursor:pointer">
+            <td class="td-bold">#${r.id}</td>
+            <td>${r.customer_name}<br><span class="td-muted">${r.item_count} ürün</span></td>
+            <td class="td-mono">${money(r.total_amount)}</td>
+            <td class="td-mono ${kalan > 0 ? 'money-neg' : 'money-pos'}">${kalan > 0 ? money(kalan) : '✓'}</td>
+            <td>${chip(r.status)}</td>
+          </tr>`
+        }).join('')
+      : `<tr><td colspan="5" class="td-muted" style="text-align:center;padding:20px">Henüz sipariş yok</td></tr>`
+
+    const jobList = document.getElementById('job-list')
+    jobList.innerHTML = d.today_jobs.length
+      ? d.today_jobs.map(j => {
+          const detail = j.personalization ? `✏️ ${j.personalization}` : ''
+          return `<div class="job-item">
+            <div class="job-code">${j.product_code}</div>
+            <div class="job-info">
+              <div class="job-name">${j.product_name} <span style="font-weight:400;color:var(--text-secondary)">×${j.quantity}</span></div>
+              ${detail ? `<div class="job-detail">${detail}</div>` : ''}
+            </div>
+            <div>${jobChip(j.status)}</div>
+          </div>`
+        }).join('')
+      : `<div class="td-muted" style="text-align:center;padding:20px">Bekleyen üretim işi yok 🎉</div>`
+
+  } catch (e) {
+    document.getElementById('daily-summary').textContent = 'Veri yüklenemedi'
+    console.error(e)
+  }
+}
+
+loadDashboard()
+setInterval(loadDashboard, 60000)
+</script>
+</body>
+</html>

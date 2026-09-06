@@ -1,0 +1,29 @@
+# Environment
+.env
+
+# Dependencies
+node_modules/
+
+# Database volume
+db_data/
+
+# Temp / data files
+*.xlsx
+*.csv
+read-xlsx.mjs
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.venv/

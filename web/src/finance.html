@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Finans — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Finans</h1></div>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="openTransfer()">↔ Transfer</button>
+      <button class="btn btn-primary" onclick="openExpense()">+ Gider Ekle</button>
+    </div>
+  </div>
+
+  <!-- KPI Özet -->
+  <div class="card-grid grid-4" style="margin-bottom:20px">
+    <div class="card kpi-card">
+      <div class="kpi-icon" style="background:var(--green-bg)">💵</div>
+      <div class="kpi-label">Toplam Kasa / Banka</div>
+      <div class="kpi-value sm" id="val-cash">—</div>
+      <div class="kpi-sub">kullanılabilir</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-icon" style="background:var(--blue-bg)">📥</div>
+      <div class="kpi-label">Müşteri Alacağı</div>
+      <div class="kpi-value sm" id="val-recv">—</div>
+      <div class="kpi-sub">tahsil edilmedi</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-icon" style="background:var(--red-bg)">📤</div>
+      <div class="kpi-label">Tedarikçi Borcu</div>
+      <div class="kpi-value sm" id="val-payable">—</div>
+      <div class="kpi-sub">ödenecek</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-icon" style="background:var(--yellow-bg)">📊</div>
+      <div class="kpi-label">Bu Ay Net</div>
+      <div class="kpi-value sm" id="val-net">—</div>
+      <div class="kpi-sub" id="sub-net">gelir - gider</div>
+    </div>
+  </div>
+
+  <!-- Hesap Kartları -->
+  <div class="section-title">Hesaplar</div>
+  <div class="card-grid grid-3" id="accounts-grid" style="margin-bottom:20px">
+    <div class="card" style="color:var(--text-secondary);font-size:.85rem;padding:24px;text-align:center">Yükleniyor...</div>
+  </div>
+
+  <!-- Hareketler -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div class="section-title" style="margin:0">Para Hareketleri</div>
+      <select id="acc-filter" class="form-control" style="width:180px;padding:5px 8px" onchange="loadTransactions()">
+        <option value="">Tüm hesaplar</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Tarih</th><th>Açıklama</th><th>Tür</th><th>Hesap</th><th style="text-align:right">Tutar</th></tr>
+        </thead>
+        <tbody id="txn-body">
+          <tr><td colspan="5" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('finance')
+
+let accounts = []
+const txnTypeLabel = {
+  customer_payment:'Müşteri Tahsilatı', supplier_payment:'Tedarikçi Ödemesi',
+  expense:'Gider', asset_purchase:'Demirbaş Alımı',
+  founder_funding:'Kurucu Finansmanı', founder_repayment:'Kurucuya Geri Ödeme',
+  transfer_in:'Transfer Girişi', transfer_out:'Transfer Çıkışı'
+}
+
+async function loadSummary() {
+  const f = await api('/finance/summary')
+  document.getElementById('val-cash').textContent = money(f.available_cash)
+  document.getElementById('val-recv').textContent = money(f.customer_receivable)
+  document.getElementById('val-payable').textContent = money(f.supplier_payable)
+  const net = parseFloat(f.this_month_income||0) - parseFloat(f.this_month_expense||0)
+  const netEl = document.getElementById('val-net')
+  netEl.textContent = money(net)
+  netEl.className = `kpi-value sm ${net>=0?'money-pos':'money-neg'}`
+  document.getElementById('sub-net').textContent = `+${money(f.this_month_income)} / -${money(f.this_month_expense)}`
+}
+
+async function loadAccounts() {
+  accounts = await api('/finance/accounts')
+  const grid = document.getElementById('accounts-grid')
+  const sel = document.getElementById('acc-filter')
+  sel.innerHTML = `<option value="">Tüm hesaplar</option>` +
+    accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')
+
+  if (!accounts.length) {
+    grid.innerHTML = `<div class="card" style="color:var(--text-secondary);text-align:center;padding:24px">Henüz hesap tanımlanmamış</div>
+      <div style="display:flex;align-items:center"><button class="btn btn-primary" onclick="openNewAccount()">+ Yeni Hesap</button></div>`
+    return
+  }
+
+  grid.innerHTML = accounts.map(a => `
+    <div class="card kpi-card" onclick="document.getElementById('acc-filter').value='${a.id}';loadTransactions()" style="cursor:pointer">
+      <div class="kpi-label">${a.name}</div>
+      <div class="kpi-value sm">${money(a.balance)}</div>
+      <div class="kpi-sub">${a.account_type==='cash'?'Nakit':a.account_type==='bank'?'Banka':a.account_type==='card'?'Kart / Sağlayıcı':'Diğer'}</div>
+    </div>
+  `).join('') + `<div class="card" style="display:flex;align-items:center;justify-content:center">
+    <button class="btn btn-secondary" onclick="openNewAccount()">+ Yeni Hesap</button>
+  </div>`
+}
+
+async function loadTransactions() {
+  const accId = document.getElementById('acc-filter').value
+  const data = await api(`/finance/transactions${accId?'?account_id='+accId:''}`)
+  const body = document.getElementById('txn-body')
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">💳</div><div>Hareket bulunamadı</div></div></td></tr>`
+    return
+  }
+  body.innerHTML = data.map(t => `<tr>
+    <td class="td-muted">${fmtDate(t.transaction_date)}</td>
+    <td>${t.description||txnTypeLabel[t.transaction_type]||t.transaction_type}</td>
+    <td>${txnTypeLabel[t.transaction_type]||t.transaction_type}</td>
+    <td class="td-muted">${t.account_name}</td>
+    <td class="td-mono td-bold" style="text-align:right;${parseFloat(t.amount)>0?'color:var(--green)':'color:var(--red)'}">
+      ${parseFloat(t.amount)>0?'+':''}${money(t.amount)}
+    </td>
+  </tr>`).join('')
+}
+
+window.openExpense = () => {
+  openModal(`
+    <div class="modal-header"><h3>Gider Ekle</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Tutar *</label><input id="exp-amount" class="form-control" type="number" placeholder="0" /></div>
+        <div class="form-group"><label class="form-label">Hesap *</label>
+          <select id="exp-account" class="form-control">
+            ${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Kategori</label>
+        <select id="exp-type" class="form-control">
+          <option value="expense">Genel Gider</option>
+          <option value="asset_purchase">Demirbaş / Ekipman</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Açıklama</label>
+        <input id="exp-desc" class="form-control" placeholder="Kargo, kira, meta reklam..." />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveExpense()">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveExpense = async () => {
+  const amount = parseFloat(document.getElementById('exp-amount').value)
+  const account_id = document.getElementById('exp-account').value
+  const transaction_type = document.getElementById('exp-type').value
+  const description = document.getElementById('exp-desc').value
+  if (!amount||amount<=0) { toast('Geçerli tutar girin','error'); return }
+  try {
+    await api('/finance/transactions',{method:'POST',body:{account_id,amount:-amount,transaction_type,description}})
+    toast('Gider kaydedildi')
+    closeModal()
+    loadSummary(); loadTransactions()
+  } catch(e) { toast(e.message,'error') }
+}
+
+window.openTransfer = () => {
+  openModal(`
+    <div class="modal-header"><h3>Hesaplar Arası Transfer</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Kaynak Hesap</label>
+          <select id="tr-from" class="form-control">${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label class="form-label">Hedef Hesap</label>
+          <select id="tr-to" class="form-control">${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Tutar *</label>
+        <input id="tr-amount" class="form-control" type="number" placeholder="0" />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveTransfer()">Transfer Yap</button>
+    </div>
+  `)
+}
+
+window.saveTransfer = async () => {
+  const from_account_id = document.getElementById('tr-from').value
+  const to_account_id = document.getElementById('tr-to').value
+  const amount = parseFloat(document.getElementById('tr-amount').value)
+  if (from_account_id === to_account_id) { toast('Aynı hesap seçilemez','error'); return }
+  if (!amount||amount<=0) { toast('Geçerli tutar girin','error'); return }
+  try {
+    await api('/finance/transfer',{method:'POST',body:{from_account_id,to_account_id,amount}})
+    toast('Transfer yapıldı')
+    closeModal()
+    loadSummary(); loadAccounts(); loadTransactions()
+  } catch(e) { toast(e.message,'error') }
+}
+
+window.openNewAccount = () => {
+  openModal(`
+    <div class="modal-header"><h3>Yeni Hesap</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Hesap Adı *</label><input id="na-name" class="form-control" placeholder="Nakit, İş Bankası..." /></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Tür</label>
+          <select id="na-type" class="form-control">
+            <option value="cash">Nakit</option><option value="bank">Banka</option>
+            <option value="card">Kart / Sağlayıcı</option><option value="founder">Kurucu</option>
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Açılış Bakiyesi</label>
+          <input id="na-balance" class="form-control" type="number" value="0" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveAccount()">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveAccount = async () => {
+  const name = document.getElementById('na-name').value.trim()
+  const account_type = document.getElementById('na-type').value
+  const balance = parseFloat(document.getElementById('na-balance').value)||0
+  if (!name) { toast('Hesap adı zorunludur','error'); return }
+  try {
+    await api('/finance/accounts',{method:'POST',body:{name,account_type,balance}})
+    toast('Hesap oluşturuldu')
+    closeModal()
+    loadAccounts()
+  } catch(e) { toast(e.message,'error') }
+}
+
+window.loadTransactions = loadTransactions
+window.closeModal = closeModal
+Promise.all([loadSummary(), loadAccounts(), loadTransactions()])
+</script>
+</body>
+</html>

@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Ayarlar — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .settings-layout { display: grid; grid-template-columns: 210px 1fr; gap: 20px; }
+    .settings-nav { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; align-self: start; position: sticky; top: 20px; }
+    .settings-nav a {
+      display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+      border-radius: 6px; font-size: .85rem; color: var(--text-secondary);
+      text-decoration: none; cursor: pointer; border: none; background: none; width: 100%;
+    }
+    .settings-nav a:hover { background: var(--surface-2); color: var(--text); }
+    .settings-nav a.active { background: rgba(34,197,94,.1); color: var(--primary); font-weight: 600; }
+    .settings-nav-group { font-size: .65rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--text-secondary); padding: 12px 12px 4px; }
+    .settings-panel { display: none; }
+    .settings-panel.active { display: block; }
+    .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .def-tag {
+      display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px;
+      border-radius: 8px; font-size: .8rem;
+      background: var(--surface-2); border: 1px solid var(--border);
+    }
+    .perm-chip { display: inline-flex; align-items: center; padding: 2px 8px;
+      border-radius: 12px; font-size: .72rem; font-weight: 500; margin: 2px;
+      background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(59,130,246,.2); }
+    .dept-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Ayarlar</h1><p style="color:var(--text-secondary);font-size:.83rem;margin-top:4px">Sistem tanımları ve yapılandırma</p></div>
+  </div>
+
+  <div class="settings-layout">
+    <div class="settings-nav">
+      <div class="settings-nav-group">Tanımlar</div>
+      <a data-panel="materials" class="active">🧵 Malzeme Tanımları</a>
+      <a data-panel="units">📐 Birim Tanımları</a>
+      <div class="settings-nav-group">CRM</div>
+      <a data-panel="channels">📡 Müşteri Kaynakları</a>
+      <div class="settings-nav-group">Finans</div>
+      <a data-panel="accounts">🏦 Banka / Kasa</a>
+      <div class="settings-nav-group">Üretim</div>
+      <a data-panel="recipes">📋 Üretim Reçeteleri</a>
+      <div class="settings-nav-group">Sistem</div>
+      <a data-panel="departments">🏢 Departmanlar</a>
+      <a data-panel="users">👤 Kullanıcılar</a>
+      <a data-panel="roles">🔐 Rol ve Yetkiler</a>
+    </div>
+
+    <div>
+
+      <!-- MALZEME TANIMLARI -->
+      <div class="settings-panel active" id="panel-materials">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Malzeme Tanımları</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Stokta takip edilecek malzemeleri tanımlayın.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openMaterialForm()">+ Yeni Malzeme</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <input id="mat-q" class="form-control" style="max-width:240px" placeholder="SKU veya ad ara..." oninput="filterMaterials()"/>
+            <select id="mat-type-f" class="form-control" style="width:160px" onchange="loadMaterials()">
+              <option value="">Tüm türler</option>
+              <option value="leather">Deri</option>
+              <option value="thread">İplik</option>
+              <option value="adhesive">Yapıştırıcı</option>
+              <option value="accessory">Aksesuar</option>
+              <option value="packaging">Ambalaj</option>
+            </select>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>SKU</th><th>Ad</th><th>Tür</th><th>Aile / Renk</th><th>Birim</th><th>Kritik</th><th>Ort. Maliyet</th><th></th></tr></thead>
+              <tbody id="mat-body"><tr><td colspan="8" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- BİRİM TANIMLARI -->
+      <div class="settings-panel" id="panel-units">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Birim Tanımları</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Malzeme ve üretimde kullanılan ölçü birimleri.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openUnitForm()">+ Yeni Birim</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Kısa Kod</th><th>Açıklama</th><th>Tür</th><th></th></tr></thead>
+              <tbody id="units-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- MÜŞTERİ KAYNAKLARI -->
+      <div class="settings-panel" id="panel-channels">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Müşteri Kaynakları (CRM)</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Müşterilerin hangi kanaldan geldiğini tanımlayın.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openChannelForm()">+ Yeni Kaynak</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Kod</th><th>Görünen Ad</th><th>Tür</th><th></th></tr></thead>
+              <tbody id="channels-body"></tbody>
+            </table>
+          </div>
+          <div style="margin-top:12px;padding:10px;background:var(--surface-2);border-radius:6px;font-size:.78rem;color:var(--text-secondary)">
+            ℹ️ Değişiklikler müşteri ve sipariş formlarına otomatik yansır.
+          </div>
+        </div>
+      </div>
+
+      <!-- BANKA / KASA HESAPLARI -->
+      <div class="settings-panel" id="panel-accounts">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Banka / Kasa Hesapları</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Tüm para hesaplarını buradan yönetin.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openAccountForm()">+ Yeni Hesap</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Hesap Adı</th><th>Tür</th><th>Bakiye</th><th>Durum</th><th></th></tr></thead>
+              <tbody id="accounts-body"><tr><td colspan="5" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- REÇETELER -->
+      <div class="settings-panel" id="panel-recipes">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Üretim Reçeteleri</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Her ürün için malzeme kullanımını ve fire oranlarını tanımlayın.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openRecipeForm()">+ Yeni Reçete</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Ürün</th><th>Malzeme Sayısı</th><th>Tahmini Maliyet</th><th>Son Güncelleme</th><th></th></tr></thead>
+              <tbody id="recipes-body"><tr><td colspan="5" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- DEPARTMANLAR -->
+      <div class="settings-panel" id="panel-departments">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Departmanlar</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Kullanıcıların atanacağı departmanları tanımlayın.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openDeptForm()">+ Yeni Departman</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Departman</th><th>Renk</th><th>Kullanıcı Sayısı</th><th></th></tr></thead>
+              <tbody id="departments-body"><tr><td colspan="4" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- KULLANICILAR -->
+      <div class="settings-panel" id="panel-users">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700">Kullanıcılar</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Sisteme erişim yetkisi verilecek kullanıcılar.</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openUserForm()">+ Yeni Kullanıcı</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Ad Soyad</th><th>Kullanıcı Adı</th><th>Departman</th><th>Rol</th><th>Durum</th><th></th></tr></thead>
+              <tbody id="users-body"><tr><td colspan="6" class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROL VE YETKİLER -->
+      <div class="settings-panel" id="panel-roles">
+        <div class="card">
+          <div style="font-weight:700;margin-bottom:4px">Rol ve Yetki Sistemi</div>
+          <div style="font-size:.78rem;color:var(--text-secondary);margin-bottom:16px">Her rol için erişim izinleri aşağıda tanımlanmıştır. Bu tanımlar sistem tarafından belirlenir.</div>
+          <div id="roles-body"><div class="td-muted" style="text-align:center;padding:24px">Yükleniyor...</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('settings')
+
+// ── PANEL NAVİGASYON ─────────────────────────────────────────────────────────
+const panelLoaders = {
+  materials: loadMaterials, units: loadUnits, channels: loadChannels,
+  accounts: loadAccounts, users: loadUsers, recipes: loadRecipes,
+  departments: loadDepartments, roles: loadRoles,
+}
+document.querySelectorAll('.settings-nav a[data-panel]').forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelectorAll('.settings-nav a').forEach(a => a.classList.remove('active'))
+    document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'))
+    link.classList.add('active')
+    document.getElementById(`panel-${link.dataset.panel}`).classList.add('active')
+    panelLoaders[link.dataset.panel]?.()
+  })
+})
+
+// ── MALZEME TANIMLARI ────────────────────────────────────────────────────────
+const typeLabel = { leather:'Deri', thread:'İplik', adhesive:'Yapıştırıcı', accessory:'Aksesuar', packaging:'Ambalaj' }
+let allMaterials = []
+
+async function loadMaterials() {
+  const type = document.getElementById('mat-type-f').value
+  allMaterials = await api(`/materials${type ? '?material_type=' + type : ''}`)
+  renderMaterials(allMaterials)
+}
+
+function renderMaterials(data) {
+  const body = document.getElementById('mat-body')
+  if (!data.length) { body.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">🧵</div><div>Malzeme bulunamadı</div></div></td></tr>`; return }
+  body.innerHTML = data.map(m => `<tr>
+    <td class="td-bold td-mono" style="font-size:.82rem">${m.sku}</td>
+    <td>${m.name}</td>
+    <td><span class="chip chip-gray">${typeLabel[m.material_type] || m.material_type}</span></td>
+    <td class="td-muted">${[m.family, m.color].filter(Boolean).join(' / ') || '—'}</td>
+    <td class="td-mono">${m.unit}</td>
+    <td class="td-mono ${parseFloat(m.current_stock || 0) <= parseFloat(m.reorder_level || 0) ? 'money-neg' : ''}">${m.reorder_level || '—'}</td>
+    <td class="td-mono">${m.avg_cost ? money(m.avg_cost) + '/' + m.unit : '—'}</td>
+    <td class="row-actions">
+      <button class="btn btn-secondary btn-sm" onclick="openMaterialForm(${m.id})">Düzenle</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteMaterial(${m.id}, '${m.name.replace(/'/g, "\\'")}')">Sil</button>
+    </td>
+  </tr>`).join('')
+}
+
+window.filterMaterials = () => {
+  const q = document.getElementById('mat-q').value.toLowerCase()
+  renderMaterials(allMaterials.filter(m => m.sku.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)))
+}
+
+window.deleteMaterial = async (id, name) => {
+  if (!confirm(`"${name}" silinsin mi?`)) return
+  try {
+    await api(`/materials/${id}`, { method: 'DELETE' })
+    toast('Malzeme silindi'); loadMaterials()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.openMaterialForm = async (id = null) => {
+  let m = {}
+  if (id) m = await api(`/materials/${id}`)
+  const units = getUnits()
+  openModal(`
+    <div class="modal-header"><h3>${id ? 'Malzeme Düzenle' : 'Yeni Malzeme'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">SKU *</label><input id="m-sku" class="form-control" value="${m.sku || ''}" placeholder="CR-SYH"/></div>
+        <div class="form-group"><label class="form-label">Tür *</label>
+          <select id="m-type" class="form-control">
+            ${['leather','thread','adhesive','accessory','packaging'].map(t=>`<option value="${t}" ${m.material_type===t?'selected':''}>${typeLabel[t]}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Malzeme Adı *</label><input id="m-name" class="form-control" value="${m.name || ''}" /></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Deri Ailesi</label><input id="m-family" class="form-control" value="${m.family || ''}" placeholder="Crazy Horse, Pueblo..." /></div>
+        <div class="form-group"><label class="form-label">Renk</label><input id="m-color" class="form-control" value="${m.color || ''}" placeholder="Siyah, Kahve..." /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Birim</label>
+          <select id="m-unit" class="form-control">
+            ${units.map(u=>`<option value="${u.code}" ${m.unit===u.code?'selected':''}>${u.code} — ${u.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Kritik Stok Seviyesi</label><input id="m-reorder" class="form-control" type="number" value="${m.reorder_level || ''}" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveMaterial(${id || 'null'})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveMaterial = async (id) => {
+  const body = {
+    sku: document.getElementById('m-sku').value.trim(),
+    name: document.getElementById('m-name').value.trim(),
+    material_type: document.getElementById('m-type').value,
+    family: document.getElementById('m-family').value || null,
+    color: document.getElementById('m-color').value || null,
+    unit: document.getElementById('m-unit').value,
+    reorder_level: document.getElementById('m-reorder').value || null,
+  }
+  if (!body.sku || !body.name) { toast('SKU ve ad zorunludur', 'error'); return }
+  try {
+    if (id) await api(`/materials/${id}`, { method: 'PUT', body })
+    else await api('/materials', { method: 'POST', body })
+    toast(id ? 'Malzeme güncellendi' : 'Malzeme eklendi')
+    closeModal(); loadMaterials()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// ── BİRİM TANIMLARI ─────────────────────────────────────────────────────────
+const DEFAULT_UNITS = [
+  { code: 'desi', label: 'Desi (Deri ölçüsü)', isDefault: true },
+  { code: 'adet', label: 'Adet',                isDefault: true },
+  { code: 'm',    label: 'Metre',               isDefault: true },
+  { code: 'cm',   label: 'Santimetre',          isDefault: true },
+  { code: 'ml',   label: 'Mililitre',           isDefault: true },
+  { code: 'g',    label: 'Gram',                isDefault: true },
+  { code: 'kg',   label: 'Kilogram',            isDefault: true },
+]
+
+function getUnits() { return JSON.parse(localStorage.getItem('decco_units') || JSON.stringify(DEFAULT_UNITS)) }
+function saveUnits(u) { localStorage.setItem('decco_units', JSON.stringify(u)) }
+
+function loadUnits() {
+  const units = getUnits()
+  const body = document.getElementById('units-body')
+  body.innerHTML = units.map((u, i) => `<tr>
+    <td class="td-bold td-mono">${u.code}</td>
+    <td>${u.label}</td>
+    <td><span class="chip ${u.isDefault ? 'chip-gray' : 'chip-blue'}">${u.isDefault ? 'Varsayılan' : 'Özel'}</span></td>
+    <td class="row-actions">
+      <button class="btn btn-secondary btn-sm" onclick="openUnitForm(${i})">Düzenle</button>
+      ${!u.isDefault ? `<button class="btn btn-danger btn-sm" onclick="deleteUnit(${i})">Sil</button>` : ''}
+    </td>
+  </tr>`).join('')
+}
+
+window.openUnitForm = (idx = null) => {
+  const units = getUnits()
+  const u = idx !== null ? units[idx] : {}
+  openModal(`
+    <div class="modal-header"><h3>${idx !== null ? 'Birim Düzenle' : 'Yeni Birim'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Kısa Kod *</label>
+          <input id="u-code" class="form-control" value="${u.code || ''}" placeholder="m, kg, desi..." ${u.isDefault ? 'readonly' : ''}/></div>
+        <div class="form-group"><label class="form-label">Açıklama *</label>
+          <input id="u-label" class="form-control" value="${u.label || ''}" placeholder="Metre, Kilogram..." /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveUnit(${idx})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveUnit = (idx) => {
+  const code = document.getElementById('u-code').value.trim()
+  const label = document.getElementById('u-label').value.trim()
+  if (!code || !label) { toast('Kod ve açıklama gerekli', 'error'); return }
+  const units = getUnits()
+  if (idx === null || idx === 'null') {
+    if (units.find(u => u.code === code)) { toast('Bu birim zaten var', 'error'); return }
+    units.push({ code, label, isDefault: false })
+  } else {
+    units[idx] = { ...units[idx], label }
+  }
+  saveUnits(units); closeModal(); loadUnits(); toast('Birim kaydedildi')
+}
+
+window.deleteUnit = (i) => {
+  const units = getUnits()
+  if (units[i].isDefault) { toast('Varsayılan birimler silinemez', 'error'); return }
+  units.splice(i, 1); saveUnits(units); loadUnits(); toast('Birim silindi')
+}
+
+// ── MÜŞTERİ KAYNAKLARI ──────────────────────────────────────────────────────
+const DEFAULT_CHANNELS = [
+  { code: 'whatsapp',  label: 'WhatsApp',  isDefault: true },
+  { code: 'instagram', label: 'Instagram', isDefault: true },
+  { code: 'web',       label: 'Web Sitesi',isDefault: true },
+  { code: 'direct',    label: 'Yüz Yüze', isDefault: true },
+  { code: 'trendyol',  label: 'Trendyol',  isDefault: true },
+]
+
+function getChannels() { return JSON.parse(localStorage.getItem('decco_channels') || JSON.stringify(DEFAULT_CHANNELS)) }
+function saveChannels(ch) { localStorage.setItem('decco_channels', JSON.stringify(ch)) }
+
+function loadChannels() {
+  const channels = getChannels()
+  const body = document.getElementById('channels-body')
+  body.innerHTML = channels.map((c, i) => `<tr>
+    <td class="td-bold td-mono">${c.code}</td>
+    <td>${c.label}</td>
+    <td><span class="chip ${c.isDefault ? 'chip-gray' : 'chip-green'}">${c.isDefault ? 'Varsayılan' : 'Özel'}</span></td>
+    <td class="row-actions">
+      <button class="btn btn-secondary btn-sm" onclick="openChannelForm(${i})">Düzenle</button>
+      ${!c.isDefault ? `<button class="btn btn-danger btn-sm" onclick="deleteChannel(${i})">Sil</button>` : ''}
+    </td>
+  </tr>`).join('')
+}
+
+window.openChannelForm = (idx = null) => {
+  const channels = getChannels()
+  const c = idx !== null ? channels[idx] : {}
+  openModal(`
+    <div class="modal-header"><h3>${idx !== null ? 'Kaynak Düzenle' : 'Yeni Kaynak'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Kod *</label>
+          <input id="ch-code" class="form-control" value="${c.code || ''}" placeholder="trendyol" ${c.isDefault ? 'readonly' : ''}/></div>
+        <div class="form-group"><label class="form-label">Görünen Ad *</label>
+          <input id="ch-label" class="form-control" value="${c.label || ''}" placeholder="Trendyol" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveChannel(${idx})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveChannel = (idx) => {
+  const code = document.getElementById('ch-code').value.trim()
+  const label = document.getElementById('ch-label').value.trim()
+  if (!code || !label) { toast('Kod ve ad gerekli', 'error'); return }
+  const channels = getChannels()
+  if (idx === null || idx === 'null') {
+    if (channels.find(c => c.code === code)) { toast('Bu kaynak zaten var', 'error'); return }
+    channels.push({ code, label, isDefault: false })
+  } else {
+    channels[idx] = { ...channels[idx], label }
+  }
+  saveChannels(channels); closeModal(); loadChannels(); toast('Kaynak kaydedildi')
+}
+
+window.deleteChannel = (i) => {
+  const channels = getChannels()
+  if (channels[i].isDefault) { toast('Varsayılan kaynaklar silinemez', 'error'); return }
+  channels.splice(i, 1); saveChannels(channels); loadChannels(); toast('Kaynak silindi')
+}
+
+// ── BANKA / KASA HESAPLARI ────────────────────────────────────────────────────
+const accTypeLabel = { cash: 'Nakit Kasa', bank: 'Banka', card: 'Kart / Sağlayıcı', founder: 'Kurucu Fonu' }
+
+async function loadAccounts() {
+  const data = await api('/finance/accounts')
+  const body = document.getElementById('accounts-body')
+  if (!data.length) { body.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">🏦</div><div>Hesap tanımlanmamış</div></div></td></tr>`; return }
+  body.innerHTML = data.map(a => `<tr>
+    <td class="td-bold">${a.name}</td>
+    <td><span class="chip chip-blue">${accTypeLabel[a.account_type] || a.account_type}</span></td>
+    <td class="td-mono td-bold">${money(a.balance)}</td>
+    <td><span class="chip ${a.is_active ? 'chip-green' : 'chip-gray'}">${a.is_active ? 'Aktif' : 'Pasif'}</span></td>
+    <td class="row-actions"><button class="btn btn-secondary btn-sm" onclick="openAccountForm(${a.id})">Düzenle</button></td>
+  </tr>`).join('')
+}
+
+window.openAccountForm = async (id = null) => {
+  let a = {}
+  if (id) { const all = await api('/finance/accounts'); a = all.find(x => x.id === id) || {} }
+  openModal(`
+    <div class="modal-header"><h3>${id ? 'Hesap Düzenle' : 'Yeni Hesap'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Hesap Adı *</label><input id="a-name" class="form-control" value="${a.name || ''}" placeholder="İş Bankası Vadesiz..."/></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Tür</label>
+          <select id="a-type" class="form-control">
+            ${Object.entries(accTypeLabel).map(([v,l])=>`<option value="${v}" ${a.account_type===v?'selected':''}>${l}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">${id ? 'Mevcut Bakiye (salt okunur)' : 'Açılış Bakiyesi'}</label>
+          <input id="a-balance" class="form-control" type="number" value="${a.balance || 0}" ${id ? 'readonly' : ''} />
+        </div>
+      </div>
+      ${id ? `<div class="form-group"><label class="form-label">Durum</label>
+        <select id="a-active" class="form-control"><option value="true" ${a.is_active?'selected':''}>Aktif</option><option value="false" ${!a.is_active?'selected':''}>Pasif</option></select>
+      </div>` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveAccount(${id || 'null'})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveAccount = async (id) => {
+  const name = document.getElementById('a-name').value.trim()
+  const account_type = document.getElementById('a-type').value
+  const balance = parseFloat(document.getElementById('a-balance').value) || 0
+  if (!name) { toast('Hesap adı zorunludur', 'error'); return }
+  const body = { name, account_type, balance }
+  if (id) body.is_active = document.getElementById('a-active').value === 'true'
+  try {
+    if (id) await api(`/finance/accounts/${id}`, { method: 'PUT', body })
+    else await api('/finance/accounts', { method: 'POST', body })
+    toast(id ? 'Hesap güncellendi' : 'Hesap oluşturuldu')
+    closeModal(); loadAccounts()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// ── DEPARTMANLAR ─────────────────────────────────────────────────────────────
+const deptColors = {
+  purple: '#c4b5fd', yellow: '#fef08a', green: '#86efac',
+  blue: '#93c5fd', gray: '#9ca3af', red: '#fca5a5', orange: '#fdba74',
+}
+let allDepts = []
+
+async function loadDepartments() {
+  const [depts, users] = await Promise.all([api('/settings/departments'), api('/settings/users')])
+  allDepts = depts
+  const body = document.getElementById('departments-body')
+  body.innerHTML = depts.map(d => {
+    const count = users.filter(u => u.department === d.name).length
+    return `<tr>
+      <td class="td-bold">
+        <span class="dept-dot" style="background:${deptColors[d.color] || '#9ca3af'};margin-right:8px"></span>
+        ${d.name}
+      </td>
+      <td><span class="chip" style="background:${deptColors[d.color] || '#9ca3af'}22;color:${deptColors[d.color] || '#9ca3af'}">${d.color}</span></td>
+      <td class="td-mono">${count} kullanıcı</td>
+      <td class="row-actions">
+        <button class="btn btn-secondary btn-sm" onclick="openDeptForm(${d.id})">Düzenle</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteDept(${d.id}, '${d.name.replace(/'/g,"\\'")}')">Sil</button>
+      </td>
+    </tr>`
+  }).join('')
+}
+
+window.openDeptForm = async (id = null) => {
+  const d = id ? allDepts.find(x => x.id === id) || {} : {}
+  openModal(`
+    <div class="modal-header"><h3>${id ? 'Departman Düzenle' : 'Yeni Departman'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Departman Adı *</label>
+        <input id="d-name" class="form-control" value="${d.name || ''}" placeholder="Üretim, Satış..." /></div>
+      <div class="form-group"><label class="form-label">Renk</label>
+        <select id="d-color" class="form-control">
+          ${Object.keys(deptColors).map(c=>`<option value="${c}" ${d.color===c?'selected':''}>${c}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveDept(${id || 'null'})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveDept = async (id) => {
+  const name = document.getElementById('d-name').value.trim()
+  const color = document.getElementById('d-color').value
+  if (!name) { toast('Ad zorunludur', 'error'); return }
+  try {
+    if (id) await api(`/settings/departments/${id}`, { method: 'PUT', body: { name, color } })
+    else await api('/settings/departments', { method: 'POST', body: { name, color } })
+    toast(id ? 'Departman güncellendi' : 'Departman eklendi')
+    closeModal(); loadDepartments()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.deleteDept = async (id, name) => {
+  if (!confirm(`"${name}" silinsin mi?`)) return
+  try {
+    await api(`/settings/departments/${id}`, { method: 'DELETE' })
+    toast('Departman silindi'); loadDepartments()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// ── KULLANICILAR ─────────────────────────────────────────────────────────────
+const roleLabel = { admin: 'Yönetici', production: 'Üretim', sales: 'Satış', finance: 'Finans', readonly: 'Salt Okunur' }
+const roleChipClass = { admin: 'chip-purple', production: 'chip-yellow', sales: 'chip-green', finance: 'chip-blue', readonly: 'chip-gray' }
+let allUsers = []
+
+async function loadUsers() {
+  try {
+    allUsers = await api('/settings/users')
+    const body = document.getElementById('users-body')
+    if (!allUsers.length) {
+      body.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">👤</div><div>Kullanıcı tanımlanmamış</div></div></td></tr>`; return
+    }
+    body.innerHTML = allUsers.map(u => `<tr>
+      <td class="td-bold">${u.full_name}</td>
+      <td class="td-muted td-mono">${u.username}</td>
+      <td><span class="td-muted">${u.department || '—'}</span></td>
+      <td><span class="chip ${roleChipClass[u.role] || 'chip-gray'}">${roleLabel[u.role] || u.role}</span></td>
+      <td><span class="chip ${u.is_active ? 'chip-green' : 'chip-gray'}">${u.is_active ? 'Aktif' : 'Pasif'}</span></td>
+      <td class="row-actions"><button class="btn btn-secondary btn-sm" onclick="openUserForm(${u.id})">Düzenle</button></td>
+    </tr>`).join('')
+  } catch (e) { toast('Kullanıcılar yüklenemedi: ' + e.message, 'error') }
+}
+
+window.openUserForm = async (id = null) => {
+  const u = id ? (allUsers.find(x => x.id === id) || {}) : {}
+  const depts = allDepts.length ? allDepts : await api('/settings/departments')
+  openModal(`
+    <div class="modal-header"><h3>${id ? 'Kullanıcı Düzenle' : 'Yeni Kullanıcı'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Ad Soyad *</label><input id="u-name" class="form-control" value="${u.full_name || ''}"/></div>
+        <div class="form-group"><label class="form-label">Kullanıcı Adı *</label><input id="u-uname" class="form-control" value="${u.username || ''}"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Departman</label>
+          <select id="u-dept" class="form-control">
+            <option value="">— Departman seçin —</option>
+            ${depts.map(d=>`<option value="${d.name}" ${u.department===d.name?'selected':''}>${d.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Rol</label>
+          <select id="u-role" class="form-control">
+            ${Object.entries(roleLabel).map(([v,l])=>`<option value="${v}" ${u.role===v?'selected':''}>${l}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Şifre ${id ? '(boş = değiştirme)' : '*'}</label>
+          <input id="u-pass" class="form-control" type="password" placeholder="${id ? '••••••' : 'En az 6 karakter'}" /></div>
+        ${id ? `<div class="form-group"><label class="form-label">Durum</label>
+          <select id="u-active" class="form-control">
+            <option value="true" ${u.is_active?'selected':''}>Aktif</option>
+            <option value="false" ${!u.is_active?'selected':''}>Pasif</option>
+          </select></div>` : '<div></div>'}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveUser(${id || 'null'})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveUser = async (id) => {
+  const full_name = document.getElementById('u-name').value.trim()
+  const username = document.getElementById('u-uname').value.trim()
+  const role = document.getElementById('u-role').value
+  const department = document.getElementById('u-dept').value || null
+  const password = document.getElementById('u-pass').value
+  if (!full_name || !username) { toast('Ad ve kullanıcı adı zorunludur', 'error'); return }
+  if (!id && !password) { toast('Yeni kullanıcı için şifre gerekli', 'error'); return }
+  try {
+    const body = { full_name, username, role, department, ...(password ? { password } : {}) }
+    if (id) {
+      body.is_active = document.getElementById('u-active').value === 'true'
+      await api(`/settings/users/${id}`, { method: 'PUT', body })
+    } else {
+      await api('/settings/users', { method: 'POST', body })
+    }
+    toast(id ? 'Kullanıcı güncellendi' : 'Kullanıcı oluşturuldu')
+    closeModal(); loadUsers()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// ── ROL VE YETKİLER ──────────────────────────────────────────────────────────
+async function loadRoles() {
+  const roles = await api('/settings/roles')
+  const permLabels = {
+    '*':              'Tüm Yetkiler',
+    'production':     'Üretim (tam)',
+    'stock':          'Stok (tam)',
+    'materials':      'Malzeme (tam)',
+    'recipes':        'Reçete (tam)',
+    'orders':         'Siparişler (tam)',
+    'orders:view':    'Siparişler (görüntüle)',
+    'customers':      'Müşteriler (tam)',
+    'customers:view': 'Müşteriler (görüntüle)',
+    'products':       'Ürünler (tam)',
+    'finance':        'Finans (tam)',
+    'finance:view':   'Finans (görüntüle)',
+    'suppliers':      'Tedarikçiler (tam)',
+    'dashboard':      'Dashboard',
+    'stock:view':     'Stok (görüntüle)',
+  }
+  document.getElementById('roles-body').innerHTML = roles.map(r => `
+    <div class="card" style="margin-bottom:12px;padding:14px 18px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span class="chip ${roleChipClass[r.key] || 'chip-gray'}" style="font-size:.82rem">${r.label}</span>
+        <code style="color:var(--text-secondary);font-size:.78rem">${r.key}</code>
+      </div>
+      <div>
+        ${r.permissions.map(p => `<span class="perm-chip">${permLabels[p] || p}</span>`).join('')}
+      </div>
+    </div>
+  `).join('')
+}
+
+// ── REÇETELER ────────────────────────────────────────────────────────────────
+async function loadRecipes() {
+  const data = await api('/recipes')
+  const body = document.getElementById('recipes-body')
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">📋</div><div>Henüz reçete tanımlanmamış</div></div></td></tr>`; return
+  }
+  body.innerHTML = data.map(r => `<tr>
+    <td class="td-bold">${r.product_code} — ${r.product_name}</td>
+    <td class="td-mono">${r.line_count} malzeme</td>
+    <td class="td-mono">${r.estimated_cost ? money(r.estimated_cost) : '—'}</td>
+    <td class="td-muted">${r.updated_at ? new Date(r.updated_at).toLocaleDateString('tr-TR') : '—'}</td>
+    <td class="row-actions">
+      <button class="btn btn-primary btn-sm" onclick="openRecipeDetail(${r.id})">Düzenle</button>
+    </td>
+  </tr>`).join('')
+}
+
+window.openRecipeForm = async () => {
+  const products = await api('/products')
+  openModal(`
+    <div class="modal-header"><h3>Yeni Reçete</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Ürün *</label>
+        <select id="rc-product" class="form-control">
+          <option value="">Seçin...</option>
+          ${products.map(p => `<option value="${p.id}">${p.code} — ${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Açıklama</label>
+        <input id="rc-desc" class="form-control" placeholder="v1, standart üretim..." />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="createRecipe()">Oluştur → Malzeme Ekle</button>
+    </div>
+  `)
+}
+
+window.createRecipe = async () => {
+  const product_id = document.getElementById('rc-product').value
+  const description = document.getElementById('rc-desc').value
+  if (!product_id) { toast('Ürün seçin', 'error'); return }
+  try {
+    const r = await api('/recipes', { method: 'POST', body: { product_id: parseInt(product_id), description } })
+    closeModal(); openRecipeDetail(r.id); loadRecipes()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.openRecipeDetail = async (id) => {
+  const [r, materials] = await Promise.all([api(`/recipes/${id}`), api('/materials')])
+  const units = getUnits()
+  let lines = r.lines || []
+
+  const renderLines = (lines) => lines.map((l, i) => `
+    <tr id="line-row-${i}" data-line-id="${l.id || ''}">
+      <td><select class="form-control" id="ll-mat-${i}" style="font-size:.8rem">
+        ${materials.map(m => `<option value="${m.id}" ${m.id == l.material_id ? 'selected' : ''}>${m.sku} — ${m.name}</option>`).join('')}
+      </select></td>
+      <td><input class="form-control" id="ll-qty-${i}" type="number" step="0.001" value="${l.quantity || 1}" style="width:80px"/></td>
+      <td><select class="form-control" id="ll-unit-${i}" style="width:90px">
+        ${units.map(u => `<option value="${u.code}" ${u.code === l.unit ? 'selected' : ''}>${u.code}</option>`).join('')}
+      </select></td>
+      <td><input class="form-control" id="ll-waste-${i}" type="number" step="0.01" min="0" max="1" value="${parseFloat(l.waste_rate || 0).toFixed(2)}" style="width:70px"/></td>
+      <td style="text-align:center"><button class="btn btn-danger btn-sm" onclick="this.closest('tr').remove()">✕</button></td>
+    </tr>`).join('')
+
+  openModal(`
+    <div class="modal-header">
+      <h3>📋 ${r.product_code} — ${r.product_name}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:.78rem;color:var(--text-secondary);margin-bottom:12px">
+        Her malzeme için miktar (1 ürün başına) ve fire oranı girin. Fire 0.05 = %5.
+      </div>
+      <div class="table-wrap" style="margin-bottom:12px">
+        <table>
+          <thead><tr><th>Malzeme</th><th>Miktar</th><th>Birim</th><th>Fire</th><th></th></tr></thead>
+          <tbody id="recipe-lines-body">${renderLines(lines)}</tbody>
+        </table>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="addRecipeLine()">+ Satır Ekle</button>
+    </div>
+    <div class="modal-footer">
+      <div style="font-size:.78rem;color:var(--text-secondary);flex:1">Tahmini maliyet kaydedince otomatik hesaplanır.</div>
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveRecipeLines(${id})">Reçeteyi Kaydet</button>
+    </div>
+  `, 'modal-lg')
+
+  window._recipeLineIdx = lines.length
+  window.addRecipeLine = () => {
+    const i = window._recipeLineIdx++
+    const row = document.createElement('tr')
+    row.id = `line-row-${i}`; row.dataset.lineId = ''
+    row.innerHTML = `
+      <td><select class="form-control" id="ll-mat-${i}" style="font-size:.8rem">
+        ${materials.map(m => `<option value="${m.id}">${m.sku} — ${m.name}</option>`).join('')}
+      </select></td>
+      <td><input class="form-control" id="ll-qty-${i}" type="number" step="0.001" value="1" style="width:80px"/></td>
+      <td><select class="form-control" id="ll-unit-${i}" style="width:90px">
+        ${units.map(u => `<option value="${u.code}">${u.code}</option>`).join('')}
+      </select></td>
+      <td><input class="form-control" id="ll-waste-${i}" type="number" step="0.01" min="0" max="1" value="0.05" style="width:70px"/></td>
+      <td style="text-align:center"><button class="btn btn-danger btn-sm" onclick="this.closest('tr').remove()">✕</button></td>`
+    document.getElementById('recipe-lines-body').appendChild(row)
+  }
+}
+
+window.saveRecipeLines = async (recipeId) => {
+  const rows = document.querySelectorAll('#recipe-lines-body tr')
+  const lines = []
+  rows.forEach(row => {
+    const idx = row.id.replace('line-row-', '')
+    const mat = document.getElementById(`ll-mat-${idx}`)
+    const qty = document.getElementById(`ll-qty-${idx}`)
+    const unit = document.getElementById(`ll-unit-${idx}`)
+    const waste = document.getElementById(`ll-waste-${idx}`)
+    if (mat && qty) lines.push({ material_id: parseInt(mat.value), quantity: parseFloat(qty.value) || 1, unit: unit?.value || 'desi', waste_rate: parseFloat(waste?.value) || 0 })
+  })
+  try {
+    await api(`/recipes/${recipeId}/lines`, { method: 'PUT', body: { lines } })
+    toast('Reçete kaydedildi ✓'); closeModal(); loadRecipes()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// Global
+window.closeModal = closeModal
+window.loadMaterials = loadMaterials
+window.loadAccounts = loadAccounts
+
+// Başlangıç
+loadMaterials()
+</script>
+</body>
+</html>

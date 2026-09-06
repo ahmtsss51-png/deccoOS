@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Müşteriler — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Müşteriler</h1></div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="openNewCustomer()">+ Yeni Müşteri</button>
+    </div>
+  </div>
+
+  <div class="search-bar">
+    <span>🔍</span>
+    <input id="search" type="text" placeholder="Ad veya telefon ile ara..." oninput="filterCustomers()" />
+  </div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Müşteri</th><th>Telefon</th><th>Kanal</th>
+            <th>Toplam Sipariş</th><th>Ödenen</th><th>Açık Bakiye</th><th>Son Sipariş</th>
+          </tr>
+        </thead>
+        <tbody id="customers-body">
+          <tr><td colspan="7" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- Müşteri Detay Modal -->
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('customers')
+
+let allCustomers = []
+
+const channelLabel = { whatsapp:'WhatsApp', instagram:'Instagram', web:'Web', direct:'Yüz yüze' }
+const channelChip = c => c ? `<span class="chip chip-blue">${channelLabel[c]||c}</span>` : '—'
+
+async function load() {
+  allCustomers = await api('/customers')
+  render(allCustomers)
+}
+
+function render(data) {
+  const body = document.getElementById('customers-body')
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">👤</div><div>Henüz müşteri yok</div><p>Yeni müşteri ekleyerek başlayın.</p></div></td></tr>`
+    return
+  }
+  body.innerHTML = data.map(c => {
+    const bakiye = parseFloat(c.total_ordered||0) - parseFloat(c.total_paid||0)
+    return `<tr onclick="openDetail(${c.id})">
+      <td class="td-bold">${c.name}</td>
+      <td>${c.phone||'—'}</td>
+      <td>${channelChip(c.channel)}</td>
+      <td class="td-mono">${c.order_count||0} sipariş</td>
+      <td class="td-mono">${money(c.total_paid)}</td>
+      <td class="td-mono ${bakiye>0?'money-neg':''}">${bakiye>0?money(bakiye):'✓'}</td>
+      <td class="td-muted">${fmtDate(c.created_at)}</td>
+    </tr>`
+  }).join('')
+}
+
+window.filterCustomers = () => {
+  const q = document.getElementById('search').value.toLowerCase()
+  render(allCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.phone||'').includes(q)))
+}
+
+window.openDetail = async (id) => {
+  const c = await api(`/customers/${id}`)
+  const bakiye = c.orders.reduce((s,o) => s + parseFloat(o.total_amount||0) - parseFloat(o.paid_amount||0), 0)
+  openModal(`
+    <div class="modal-header">
+      <h3>${c.name}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row" style="margin-bottom:14px">
+        <div><div class="kpi-label">Telefon</div><div>${c.phone||'—'}</div></div>
+        <div><div class="kpi-label">Kanal</div><div>${channelChip(c.channel)}</div></div>
+      </div>
+      <div class="form-row" style="margin-bottom:16px">
+        <div><div class="kpi-label">Toplam Alışveriş</div><div class="td-bold">${money(c.orders.reduce((s,o)=>s+parseFloat(o.total_amount||0),0))}</div></div>
+        <div><div class="kpi-label">Açık Bakiye</div><div class="td-bold ${bakiye>0?'money-neg':''}">${bakiye>0?money(bakiye):'Kapalı'}</div></div>
+      </div>
+      ${c.notes ? `<div class="form-group"><div class="kpi-label">Notlar</div><div>${c.notes}</div></div><hr class="divider"/>` : ''}
+      <div class="section-title" style="margin-bottom:10px">Sipariş Geçmişi</div>
+      ${c.orders.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Tarih</th><th>Tutar</th><th>Durum</th></tr></thead>
+          <tbody>${c.orders.map(o=>`<tr>
+            <td class="td-bold">#${o.id}</td>
+            <td class="td-muted">${fmtDate(o.created_at)}</td>
+            <td class="td-mono">${money(o.total_amount)}</td>
+            <td>${chip(o.status)}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>` : `<div class="td-muted">Henüz sipariş yok.</div>`}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-sm" onclick="openEditCustomer(${c.id})">Düzenle</button>
+      <button class="btn btn-secondary btn-sm" onclick="closeModal()">Kapat</button>
+    </div>
+  `, 'modal-lg')
+}
+
+window.openNewCustomer = () => customerForm()
+window.openEditCustomer = async (id) => {
+  const c = await api(`/customers/${id}`)
+  customerForm(c)
+}
+
+function customerForm(c = null) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${c ? 'Müşteri Düzenle' : 'Yeni Müşteri'}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Ad Soyad *</label>
+        <input id="f-name" class="form-control" value="${c?.name||''}" placeholder="Müşteri adı" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Telefon</label>
+          <input id="f-phone" class="form-control" value="${c?.phone||''}" placeholder="05XX XXX XX XX" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Kanal</label>
+          <select id="f-channel" class="form-control">
+            <option value="">Seçin</option>
+            ${['whatsapp','instagram','web','direct'].map(k=>`<option value="${k}" ${c?.channel===k?'selected':''}>${channelLabel[k]}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notlar</label>
+        <textarea id="f-notes" class="form-control" rows="2" placeholder="Özel notlar...">${c?.notes||''}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveCustomer(${c?.id||'null'})">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveCustomer = async (id) => {
+  const body = {
+    name: document.getElementById('f-name').value.trim(),
+    phone: document.getElementById('f-phone').value.trim() || null,
+    channel: document.getElementById('f-channel').value || null,
+    notes: document.getElementById('f-notes').value.trim() || null,
+  }
+  if (!body.name) { toast('Ad zorunludur', 'error'); return }
+  try {
+    if (id) await api(`/customers/${id}`, { method:'PUT', body })
+    else await api('/customers', { method:'POST', body })
+    toast(id ? 'Müşteri güncellendi' : 'Müşteri eklendi')
+    closeModal()
+    load()
+  } catch(e) { toast(e.message, 'error') }
+}
+
+// Global erişim
+window.closeModal = closeModal
+load()
+</script>
+</body>
+</html>

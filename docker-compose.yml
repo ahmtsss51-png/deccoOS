@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: decco_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-decco}
+      POSTGRES_USER: ${POSTGRES_USER:-decco}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-decco123}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-decco} -d ${POSTGRES_DB:-decco}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: decco_api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-decco}:${POSTGRES_PASSWORD:-decco123}@db:5432/${POSTGRES_DB:-decco}
+      JWT_SECRET: ${JWT_SECRET:-changeme-in-production}
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+    volumes:
+      - ./api/src:/app/src
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: decco_web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+volumes:
+  db_data:

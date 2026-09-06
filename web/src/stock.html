@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Stok — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Stok</h1></div>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="openNewMaterial()">+ Yeni Malzeme</button>
+      <button class="btn btn-primary" onclick="openMovement()">+ Stok Hareketi</button>
+    </div>
+  </div>
+
+  <div class="filter-tabs">
+    <button class="filter-tab active" data-tab="materials">Malzemeler</button>
+    <button class="filter-tab" data-tab="finished">Hazır Ürünler</button>
+    <button class="filter-tab" data-tab="movements">Hareketler</button>
+  </div>
+
+  <div id="tab-materials">
+    <div class="search-bar" style="margin-bottom:12px">
+      <span>🔍</span>
+      <input id="mat-search" type="text" placeholder="SKU veya malzeme adı ara..." oninput="filterMaterials()" />
+      <select id="mat-type" class="form-control" style="width:160px;padding:4px 8px" onchange="loadMaterials()">
+        <option value="">Tüm türler</option>
+        <option value="leather">Deri</option>
+        <option value="thread">İplik</option>
+        <option value="adhesive">Yapıştırıcı</option>
+        <option value="accessory">Aksesuar</option>
+        <option value="packaging">Ambalaj</option>
+      </select>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>SKU</th><th>Malzeme</th><th>Aile/Renk</th><th>Mevcut</th><th>Rezerve</th><th>Kullanılabilir</th><th>Ort. Maliyet</th><th></th></tr>
+          </thead>
+          <tbody id="materials-body">
+            <tr><td colspan="8" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-finished" style="display:none">
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Ürün</th><th>Malzeme Konfigürasyonu</th><th>Adet</th><th>Ort. Maliyet</th><th>Son Üretim</th></tr>
+          </thead>
+          <tbody id="finished-body">
+            <tr><td colspan="5" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-movements" style="display:none">
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Tarih</th><th>Malzeme</th><th>İşlem</th><th>Miktar</th><th>Birim Maliyet</th><th>Referans</th></tr>
+          </thead>
+          <tbody id="movements-body">
+            <tr><td colspan="6" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('stock')
+
+let allMaterials = []
+const movTypeLabel = {
+  purchase_in:'Satın Alma Girişi', opening_in:'Açılış Girişi', production_out:'Üretimde Kullanıldı',
+  production_in:'Üretim Çıktısı', sale_out:'Satış Çıkışı', return_in:'İade Girişi',
+  scrap_out:'Fire/Hurda', count_adjust:'Sayım Düzeltme', transfer_in:'Transfer Girişi', transfer_out:'Transfer Çıkışı'
+}
+
+async function loadMaterials() {
+  const type = document.getElementById('mat-type').value
+  allMaterials = await api(`/materials${type?'?material_type='+type:''}`)
+  renderMaterials(allMaterials)
+}
+
+function renderMaterials(data) {
+  const body = document.getElementById('materials-body')
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">📦</div><div>Malzeme bulunamadı</div></div></td></tr>`
+    return
+  }
+  body.innerHTML = data.map(m => {
+    const avail = parseFloat(m.current_stock||0) - parseFloat(m.reserved_stock||0)
+    const isLow = m.reorder_level && avail <= parseFloat(m.reorder_level)
+    return `<tr style="${isLow?'background:var(--red-bg)':''}" onclick="openMaterialDetail(${m.id})">
+      <td class="td-bold td-mono" style="font-family:monospace">${m.sku}</td>
+      <td>${m.name}</td>
+      <td class="td-muted">${[m.family,m.color].filter(Boolean).join(' / ')||'—'}</td>
+      <td class="td-mono">${parseFloat(m.current_stock||0).toFixed(2)} ${m.unit}</td>
+      <td class="td-mono td-muted">${parseFloat(m.reserved_stock||0).toFixed(2)}</td>
+      <td class="td-mono td-bold ${isLow?'money-neg':''}">${avail.toFixed(2)} ${m.unit}</td>
+      <td class="td-mono">${money(m.avg_cost)}/${m.unit}</td>
+      <td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openMovementFor(${m.id})">Hareket</button></td>
+    </tr>`
+  }).join('')
+}
+
+window.filterMaterials = () => {
+  const q = document.getElementById('mat-search').value.toLowerCase()
+  renderMaterials(allMaterials.filter(m => m.sku.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)))
+}
+
+async function loadFinished() {
+  const data = await api('/stock/finished')
+  const body = document.getElementById('finished-body')
+  if (!data.length) {
+    body.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">🎒</div><div>Hazır üründe stok yok</div></div></td></tr>`
+    return
+  }
+  body.innerHTML = data.map(row => {
+    const conf = row.material_config ? (typeof row.material_config==='string'?JSON.parse(row.material_config):row.material_config) : {}
+    return `<tr>
+      <td class="td-bold">${row.product_code} — ${row.product_name}</td>
+      <td class="td-muted">${conf.note||'—'}</td>
+      <td class="td-bold td-mono">${row.total_qty} adet</td>
+      <td class="td-mono">${row.avg_cost?money(row.avg_cost):'-'}</td>
+      <td class="td-muted">${fmtDate(row.last_produced)}</td>
+    </tr>`
+  }).join('')
+}
+
+async function loadMovements() {
+  // Son hareketleri tüm malzemelerden toplarız
+  const data = await api('/materials')
+  if (!data.length) { document.getElementById('movements-body').innerHTML = '<tr><td colspan="6" class="td-muted" style="text-align:center;padding:24px">Veri yok</td></tr>'; return }
+  const first = data[0]
+  const detail = await api(`/materials/${first.id}`)
+  const body = document.getElementById('movements-body')
+  body.innerHTML = detail.movements.map(mv => `<tr>
+    <td class="td-muted">${fmtDate(mv.created_at)}</td>
+    <td>${first.name}</td>
+    <td>${movTypeLabel[mv.movement_type]||mv.movement_type}</td>
+    <td class="td-mono ${parseFloat(mv.quantity)>0?'money-pos':'money-neg'}">${parseFloat(mv.quantity)>0?'+':''}${parseFloat(mv.quantity).toFixed(2)}</td>
+    <td class="td-mono">${mv.unit_cost?money(mv.unit_cost):'—'}</td>
+    <td class="td-muted">${mv.reference_type||''} ${mv.reference_id||''}</td>
+  </tr>`).join('')
+}
+
+window.openMaterialDetail = async (id) => {
+  const m = await api(`/materials/${id}`)
+  const avail = parseFloat(m.current_stock||0) - parseFloat(m.reserved_stock||0)
+  openModal(`
+    <div class="modal-header"><h3>${m.sku} — ${m.name}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row" style="margin-bottom:14px">
+        <div><div class="kpi-label">Mevcut Stok</div><div class="td-bold" style="font-size:1.2rem">${parseFloat(m.current_stock||0).toFixed(2)} ${m.unit}</div></div>
+        <div><div class="kpi-label">Kullanılabilir</div><div class="td-bold" style="font-size:1.2rem">${avail.toFixed(2)} ${m.unit}</div></div>
+        <div><div class="kpi-label">Ort. Maliyet</div><div>${money(m.avg_cost)}/${m.unit}</div></div>
+      </div>
+      <div class="section-title" style="margin-bottom:8px">Son Hareketler</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tarih</th><th>Tür</th><th>Miktar</th></tr></thead>
+          <tbody>${m.movements.slice(0,10).map(mv=>`<tr>
+            <td class="td-muted">${fmtDate(mv.created_at)}</td>
+            <td>${movTypeLabel[mv.movement_type]||mv.movement_type}</td>
+            <td class="td-mono ${parseFloat(mv.quantity)>0?'money-pos':'money-neg'}">${parseFloat(mv.quantity)>0?'+':''}${parseFloat(mv.quantity).toFixed(2)}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-sm" onclick="closeModal();openMovementFor(${id})">Stok Hareketi Ekle</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+    </div>
+  `, 'modal-lg')
+}
+
+window.openNewMaterial = () => {
+  openModal(`
+    <div class="modal-header"><h3>Yeni Malzeme</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">SKU *</label><input id="nm-sku" class="form-control" placeholder="CR-SYH, KM-YSL..." /></div>
+        <div class="form-group"><label class="form-label">Tür *</label>
+          <select id="nm-type" class="form-control">
+            <option value="leather">Deri</option><option value="thread">İplik</option>
+            <option value="adhesive">Yapıştırıcı</option><option value="accessory">Aksesuar</option>
+            <option value="packaging">Ambalaj</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Malzeme Adı *</label><input id="nm-name" class="form-control" placeholder="Kaşmir Yeşil Deri" /></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Deri Ailesi</label><input id="nm-family" class="form-control" placeholder="Kaşmir, Crazy, Pueblo..." /></div>
+        <div class="form-group"><label class="form-label">Renk</label><input id="nm-color" class="form-control" placeholder="Yeşil, Siyah..." /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Birim</label>
+          <select id="nm-unit" class="form-control"><option value="desi">desi</option><option value="adet">adet</option><option value="ml">ml</option><option value="m">m</option></select>
+        </div>
+        <div class="form-group"><label class="form-label">Kritik Stok Seviyesi</label><input id="nm-reorder" class="form-control" type="number" placeholder="5" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveMaterial()">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveMaterial = async () => {
+  const body = { sku:document.getElementById('nm-sku').value.trim(), name:document.getElementById('nm-name').value.trim(),
+    material_type:document.getElementById('nm-type').value, family:document.getElementById('nm-family').value||null,
+    color:document.getElementById('nm-color').value||null, unit:document.getElementById('nm-unit').value,
+    reorder_level:document.getElementById('nm-reorder').value||null }
+  if (!body.sku||!body.name) { toast('SKU ve ad zorunludur','error'); return }
+  try { await api('/materials',{method:'POST',body}); toast('Malzeme eklendi'); closeModal(); loadMaterials() }
+  catch(e) { toast(e.message,'error') }
+}
+
+window.openMovement = async () => {
+  const materials = await api('/materials')
+  showMovementModal(materials, null)
+}
+
+window.openMovementFor = async (id) => {
+  const materials = await api('/materials')
+  showMovementModal(materials, id)
+}
+
+function showMovementModal(materials, preId) {
+  openModal(`
+    <div class="modal-header"><h3>Stok Hareketi</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Malzeme *</label>
+        <select id="mv-mat" class="form-control">
+          ${materials.map(m=>`<option value="${m.id}" ${m.id==preId?'selected':''}>${m.sku} — ${m.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">İşlem Türü</label>
+          <select id="mv-type" class="form-control">
+            <option value="opening_in">Açılış Girişi</option>
+            <option value="count_adjust">Sayım Düzeltme</option>
+            <option value="return_in">İade Girişi</option>
+            <option value="scrap_out">Fire/Hurda</option>
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Miktar (+ giriş / - çıkış)</label>
+          <input id="mv-qty" class="form-control" type="number" step="0.01" placeholder="10.5" />
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Birim Maliyet (opsiyonel)</label>
+        <input id="mv-cost" class="form-control" type="number" step="0.01" placeholder="₺/birim" />
+      </div>
+      <div class="form-group"><label class="form-label">Not</label>
+        <input id="mv-notes" class="form-control" placeholder="Açıklama..." />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveMovement()">Kaydet</button>
+    </div>
+  `)
+}
+
+window.saveMovement = async () => {
+  const mat = document.getElementById('mv-mat').value
+  const qty = parseFloat(document.getElementById('mv-qty').value)
+  const type = document.getElementById('mv-type').value
+  const cost = document.getElementById('mv-cost').value
+  const notes = document.getElementById('mv-notes').value
+  if (!qty) { toast('Miktar girin','error'); return }
+  try {
+    await api(`/materials/${mat}/movements`,{method:'POST',body:{movement_type:type,quantity:qty,unit_cost:cost||null,notes}})
+    toast('Stok hareketi kaydedildi')
+    closeModal()
+    loadMaterials()
+  } catch(e) { toast(e.message,'error') }
+}
+
+// Sekmeler
+document.querySelectorAll('.filter-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'))
+    tab.classList.add('active')
+    const t = tab.dataset.tab
+    document.getElementById('tab-materials').style.display = t==='materials'?'':'none'
+    document.getElementById('tab-finished').style.display = t==='finished'?'':'none'
+    document.getElementById('tab-movements').style.display = t==='movements'?'':'none'
+    if (t==='finished') loadFinished()
+    if (t==='movements') loadMovements()
+  })
+})
+
+window.closeModal = closeModal
+loadMaterials()
+</script>
+</body>
+</html>

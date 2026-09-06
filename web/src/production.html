@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Üretim — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .job-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 12px; }
+    .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+    .job-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+    .job-code { font-size: .72rem; font-weight: 700; color: var(--text-secondary); }
+    .job-name { font-weight: 600; font-size: .93rem; margin-top: 2px; }
+    .job-detail { font-size: .8rem; color: var(--text-secondary); margin-top: 4px; }
+    .job-actions { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+    .overdue-bar { border-left: 3px solid var(--red); }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div><h1>Üretim</h1></div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="openNewJob()">+ Yeni Üretim İşi</button>
+    </div>
+  </div>
+
+  <div class="filter-tabs">
+    <button class="filter-tab active" data-status="pending">Bekleyen</button>
+    <button class="filter-tab" data-status="in_progress">Üretimde</button>
+    <button class="filter-tab" data-status="quality_check">Kalite Kontrol</button>
+    <button class="filter-tab" data-status="completed">Tamamlanan</button>
+  </div>
+
+  <div id="job-container" class="job-grid">
+    <div class="td-muted" style="padding:32px">Yükleniyor...</div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('production')
+
+let activeStatus = 'pending'
+let jobs = []
+
+async function load() {
+  jobs = await api(`/production?status=${activeStatus}`)
+  render()
+}
+
+function render() {
+  const container = document.getElementById('job-container')
+  if (!jobs.length) {
+    container.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🔨</div><div>Bu durumda üretim işi yok</div></div>`
+    return
+  }
+  container.innerHTML = jobs.map(j => {
+    const sel = j.material_selections ? (typeof j.material_selections==='string'?JSON.parse(j.material_selections):j.material_selections) : {}
+    const isOverdue = j.delivery_date && new Date(j.delivery_date) < new Date()
+    return `<div class="job-card ${isOverdue?'overdue-bar':''}">
+      <div class="job-card-header">
+        <div>
+          <div class="job-code">${j.product_code} · #${j.id}</div>
+          <div class="job-name">${j.product_name}</div>
+          ${sel.note?`<div class="job-detail">🎨 ${sel.note}</div>`:''}
+          ${j.delivery_date?`<div class="job-detail ${isOverdue?'money-neg':''}">📅 ${fmtDate(j.delivery_date)}</div>`:''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          ${chip(j.status)}
+          <span style="font-size:.78rem;color:var(--text-secondary)">×${j.quantity}</span>
+        </div>
+      </div>
+      <div class="job-actions">
+        ${actionBtns(j)}
+      </div>
+    </div>`
+  }).join('')
+}
+
+function actionBtns(j) {
+  if (j.status === 'pending') return `
+    <button class="btn btn-primary btn-sm" onclick="updateStatus(${j.id},'in_progress')">▶ Başlat</button>
+    <button class="btn btn-secondary btn-sm" onclick="openJobDetail(${j.id})">Detay</button>`
+  if (j.status === 'in_progress') return `
+    <button class="btn btn-secondary btn-sm" onclick="updateStatus(${j.id},'quality_check')">→ Kalite Kontrol</button>
+    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id},${j.recipe_id||'null'})">✓ Tamamla</button>`
+  if (j.status === 'quality_check') return `
+    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id},${j.recipe_id||'null'})">✓ Onayla & Tamamla</button>`
+  return `<button class="btn btn-secondary btn-sm" onclick="openJobDetail(${j.id})">Detay</button>`
+}
+
+window.updateStatus = async (id, status) => {
+  try {
+    await api(`/production/${id}/status`, { method:'PATCH', body:{status} })
+    toast('Durum güncellendi')
+    load()
+  } catch(e) { toast(e.message,'error') }
+}
+
+window.openComplete = (id, recipeId) => {
+  openModal(`
+    <div class="modal-header">
+      <h3>Üretimi Tamamla — #${id}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Birim Maliyet (₺)</label>
+        <input id="comp-cost" class="form-control" type="number" placeholder="Toplam malzeme + işçilik" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Malzeme Konfigürasyonu</label>
+        <input id="comp-config" class="form-control" placeholder="Kaşmir Yeşil, Crazy Siyah..." />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="submitComplete(${id})">Tamamla & Stoka Ekle</button>
+    </div>
+  `)
+}
+
+window.submitComplete = async (id) => {
+  const cost = parseFloat(document.getElementById('comp-cost').value)||0
+  const config = document.getElementById('comp-config').value
+  try {
+    await api(`/production/${id}/complete`, { method:'POST', body:{
+      unit_cost: cost,
+      material_config: { note: config },
+    }})
+    toast('Üretim tamamlandı, stoka eklendi ✓')
+    closeModal()
+    load()
+  } catch(e) { toast(e.message,'error') }
+}
+
+window.openJobDetail = async (id) => {
+  const jobs_all = await api(`/production`)
+  const j = jobs_all.find(x=>x.id===id)||{}
+  const sel = j.material_selections ? (typeof j.material_selections==='string'?JSON.parse(j.material_selections):j.material_selections) : {}
+  openModal(`
+    <div class="modal-header"><h3>Üretim #${id} — ${j.product_name||''}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div><div class="kpi-label">Ürün</div><div class="td-bold">${j.product_code} — ${j.product_name}</div></div>
+        <div><div class="kpi-label">Adet</div><div class="td-bold">${j.quantity}</div></div>
+      </div>
+      ${sel.note?`<div class="form-group"><div class="kpi-label">Malzeme</div><div>${sel.note}</div></div>`:''}
+      <div class="form-group"><div class="kpi-label">Durum</div><div>${chip(j.status)}</div></div>
+      ${j.started_at?`<div class="kpi-label" style="margin-top:8px">Başladı: ${fmtDate(j.started_at)}</div>`:''}
+    </div>
+    <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">Kapat</button></div>
+  `)
+}
+
+window.openNewJob = async () => {
+  const products = await api('/products')
+  openModal(`
+    <div class="modal-header"><h3>Yeni Üretim İşi</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Ürün *</label>
+        <select id="nj-product" class="form-control">
+          <option value="">Seçin...</option>
+          ${products.map(p=>`<option value="${p.id}">${p.code} — ${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Adet</label>
+          <input id="nj-qty" class="form-control" type="number" value="1" min="1"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Deri / Malzeme</label>
+          <input id="nj-material" class="form-control" placeholder="Kaşmir Yeşil..." />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notlar</label>
+        <textarea id="nj-notes" class="form-control" rows="2" placeholder="Özel notlar..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="submitNewJob()">Üretim İşi Oluştur</button>
+    </div>
+  `)
+}
+
+window.submitNewJob = async () => {
+  const product_id = document.getElementById('nj-product').value
+  const quantity = parseInt(document.getElementById('nj-qty').value)||1
+  const material = document.getElementById('nj-material').value
+  const notes = document.getElementById('nj-notes').value
+  if (!product_id) { toast('Ürün seçin','error'); return }
+  try {
+    await api('/production', { method:'POST', body:{
+      product_id:parseInt(product_id), quantity,
+      material_selections:{ note: material },
+      notes
+    }})
+    toast('Üretim işi oluşturuldu')
+    closeModal()
+    load()
+  } catch(e) { toast(e.message,'error') }
+}
+
+// Tab
+document.querySelectorAll('.filter-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'))
+    tab.classList.add('active')
+    activeStatus = tab.dataset.status
+    load()
+  })
+})
+
+window.closeModal = closeModal
+load()
+</script>
+</body>
+</html>
