@@ -157,10 +157,10 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>#</th><th>Müşteri</th><th>Tutar</th><th>Kalan</th><th>Durum</th></tr>
+            <tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th><th>Tutar</th><th>Kalan</th><th>Durum</th></tr>
           </thead>
           <tbody id="recent-orders-body">
-            <tr><td colspan="5" class="td-muted" style="text-align:center;padding:20px">Yükleniyor...</td></tr>
+            <tr><td colspan="6" class="td-muted" style="text-align:center;padding:20px">Yükleniyor...</td></tr>
           </tbody>
         </table>
       </div>
@@ -177,7 +177,7 @@
 <div id="toast-container"></div>
 
 <script type="module">
-import { api, money, chip, renderSidebar } from '/js/shared.js'
+import { api, money, chip, renderSidebar, fmtDate } from '/js/shared.js'
 renderSidebar('dashboard')
 
 document.getElementById('today-date').textContent =
@@ -238,14 +238,15 @@ async function loadDashboard() {
       ? d.recent_orders.map(r => {
           const kalan = parseFloat(r.total_amount) - parseFloat(r.paid_amount)
           return `<tr onclick="location.href='/orders.html'" style="cursor:pointer">
-            <td class="td-bold">#${r.id}</td>
-            <td>${r.customer_name}<br><span class="td-muted">${r.item_count} ürün</span></td>
+            <td class="td-bold td-mono">${r.order_no || '#' + r.id}</td>
+            <td>${r.customer_name}<br><span class="td-muted">${r.unit_count} adet · ${r.item_count} kalem</span></td>
+            <td class="td-muted">${fmtDate(r.order_date)}</td>
             <td class="td-mono">${money(r.total_amount)}</td>
             <td class="td-mono ${kalan > 0 ? 'money-neg' : 'money-pos'}">${kalan > 0 ? money(kalan) : '✓'}</td>
             <td>${chip(r.status)}</td>
           </tr>`
         }).join('')
-      : `<tr><td colspan="5" class="td-muted" style="text-align:center;padding:20px">Henüz sipariş yok</td></tr>`
+      : `<tr><td colspan="6" class="td-muted" style="text-align:center;padding:20px">Henüz sipariş yok</td></tr>`
 
     const jobList = document.getElementById('job-list')
     jobList.innerHTML = d.today_jobs.length

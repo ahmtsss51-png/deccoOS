@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Gerçek sipariş numarası (2608-011). Tarihsel aktarımda notes içine
+-- yazılmıştı; buradan tek kolona taşınır.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_no VARCHAR(50);
+UPDATE orders SET order_no = split_part(notes, ' · ', 1)
+WHERE order_no IS NULL AND notes ~ '^[0-9]{4}-[0-9]+';
+
 CREATE TABLE IF NOT EXISTS order_items (
   id                   SERIAL PRIMARY KEY,
   order_id             INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

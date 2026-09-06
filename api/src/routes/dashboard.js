@@ -27,7 +27,8 @@ router.get('/', async (_req, res, next) => {
       query(`
         SELECT
           (SELECT COALESCE(SUM(balance),0) FROM accounts WHERE is_active=TRUE AND account_type != 'founder') AS available_cash,
-          (SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM orders WHERE status NOT IN ('cancelled','completed') AND paid_amount < total_amount) AS customer_receivable,
+          -- Teslim edilmiş sipariş de ödenmemiş olabilir; sadece iptaller hariç
+          (SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM orders WHERE status <> 'cancelled' AND paid_amount < total_amount) AS customer_receivable,
           (SELECT COALESCE(SUM(total_debt),0) FROM suppliers) AS supplier_payable,
           (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE amount > 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_income,
           (SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE amount < 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_expense
@@ -58,16 +59,19 @@ router.get('/', async (_req, res, next) => {
         LIMIT 20
       `),
 
-      // Son siparişler
+      // Son siparişler — gerçek sipariş tarihine göre (created_at kayıt anıdır,
+      // toplu aktarımda hepsi aynı olduğu için sıralamaya uygun değil)
       query(`
-        SELECT o.id, o.status, o.total_amount, o.paid_amount, o.created_at, o.delivery_date,
+        SELECT o.id, o.order_no, o.status, o.total_amount, o.paid_amount,
+          o.order_date, o.delivery_date,
           c.name AS customer_name,
-          COUNT(oi.id) AS item_count
+          COUNT(oi.id) AS item_count,
+          COALESCE(SUM(oi.quantity),0) AS unit_count
         FROM orders o
         JOIN customers c ON c.id = o.customer_id
         LEFT JOIN order_items oi ON oi.order_id = o.id
         GROUP BY o.id, c.name
-        ORDER BY o.created_at DESC
+        ORDER BY o.order_date DESC NULLS LAST, o.id DESC
         LIMIT 8
       `),
     ])
