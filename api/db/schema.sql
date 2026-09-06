@@ -203,6 +203,92 @@ CREATE TABLE IF NOT EXISTS departments (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ===========================================================================
+-- AÇILIŞ / CUTOVER
+-- Sistemin canlıya alındığı gün Decco'nun GERÇEK fiziksel ve finansal durumu.
+-- Tarihsel kayıtlar burada değişmez; açılış etkisi ayrı iz bırakır.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS opening_sessions (
+  id            SERIAL PRIMARY KEY,
+  go_live_date  DATE,
+  status        VARCHAR(20) DEFAULT 'draft',   -- draft, locked
+  confirmations JSONB DEFAULT '{}'::jsonb,     -- sıfır cevabı geçerli olan bölümlerin onayı
+  locked_at     TIMESTAMPTZ,
+  locked_by     INT REFERENCES users(id),
+  notes         TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Aynı anda yalnızca bir kilitlenmemiş açılış oturumu olabilir
+CREATE UNIQUE INDEX IF NOT EXISTS opening_sessions_single_open
+  ON opening_sessions ((locked_at IS NULL)) WHERE locked_at IS NULL;
+
+-- Tüm açılış bölümlerinin tek defteri.
+-- counted_qty: NULL = sayılmadı, 0 = sayıldı ve gerçekten sıfır.
+CREATE TABLE IF NOT EXISTS opening_lines (
+  id              SERIAL PRIMARY KEY,
+  session_id      INT NOT NULL REFERENCES opening_sessions(id) ON DELETE CASCADE,
+  section         VARCHAR(30) NOT NULL,
+  -- material, finished_good, account, receivable, supplier_debt, founder
+  ref_key         VARCHAR(100) NOT NULL,
+  material_id     INT REFERENCES materials(id),
+  product_id      INT REFERENCES products(id),
+  order_id        INT REFERENCES orders(id),
+  account_id      INT REFERENCES accounts(id),
+  supplier_id     INT REFERENCES suppliers(id),
+  counted_qty     NUMERIC(12,4),
+  unit_cost       NUMERIC(12,4),
+  amount          NUMERIC(14,2),
+  previous_value  NUMERIC(14,2),   -- üzerine yazılan önceki değer (geri izlenebilirlik)
+  material_config JSONB,           -- {slots:{MAIN_LEATHER:{material_id,sku}, ...}}
+  location        VARCHAR(100) DEFAULT 'ATOLYE',
+  status          VARCHAR(20) DEFAULT 'pending',
+  -- pending, counted, confirmed, closed
+  notes           TEXT,
+  counted_at      TIMESTAMPTZ,
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS opening_lines_uniq
+  ON opening_lines (session_id, section, ref_key);
+
+-- Demirbaş kayıt defteri. Açılışta para/gider hareketi YARATMAZ;
+-- geçmiş demirbaşlarda amortisman go-live'da sıfırdan başlamasın diye
+-- birikmiş amortisman ve net defter değeri ayrıca tutulur.
+CREATE TABLE IF NOT EXISTS fixed_assets (
+  id                 SERIAL PRIMARY KEY,
+  session_id         INT REFERENCES opening_sessions(id),
+  name               VARCHAR(200) NOT NULL,
+  category           VARCHAR(100),
+  purchase_date      DATE,
+  purchase_cost      NUMERIC(14,2) DEFAULT 0,
+  in_service_date    DATE,
+  useful_life_months INT,
+  opening_accumulated_depreciation NUMERIC(14,2) DEFAULT 0,
+  opening_carrying_value           NUMERIC(14,2) DEFAULT 0,
+  payment_source     VARCHAR(100),
+  status             VARCHAR(20) DEFAULT 'active',   -- active, disposed
+  source             VARCHAR(20) DEFAULT 'OPENING',
+  notes              TEXT,
+  created_at         TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- production_outputs genel hazır ürün lot tablosu olarak kullanılıyor
+-- (stock.js ve dashboard.js job_id'ye bakmadan okuyor), bu yüzden
+-- üretim işi olmayan açılış lotları da burada tutulur.
+ALTER TABLE production_outputs ALTER COLUMN job_id DROP NOT NULL;
+ALTER TABLE production_outputs ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'PRODUCTION';
+ALTER TABLE production_outputs ADD COLUMN IF NOT EXISTS opening_line_id INT REFERENCES opening_lines(id);
+
+-- Açılış tekrar çalıştırılsa bile çift kayıt DB seviyesinde engellenir
+CREATE UNIQUE INDEX IF NOT EXISTS production_outputs_opening_uniq
+  ON production_outputs (opening_line_id) WHERE opening_line_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS stock_movements_opening_uniq
+  ON stock_movements (material_id, reference_id) WHERE reference_type = 'OPENING';
+CREATE UNIQUE INDEX IF NOT EXISTS transactions_opening_uniq
+  ON transactions (account_id, reference_id) WHERE transaction_type = 'opening_balance';
+
 -- Varsayılan departmanlar
 INSERT INTO departments (name, color) VALUES
   ('Yönetim', 'purple'),

@@ -31,6 +31,7 @@ services:
       PORT: 3000
     volumes:
       - ./api/src:/app/src
+      - ./api/db:/app/db
     ports:
       - "3000:3000"
     depends_on:
@@ -43,6 +44,9 @@ services:
       dockerfile: Dockerfile
     container_name: decco_web
     restart: unless-stopped
+    volumes:
+      - ./web/src:/usr/share/nginx/html:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "80:80"
     depends_on:

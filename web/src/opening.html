@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Açılış — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .op-hero { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      padding: 20px; margin-bottom: 16px; }
+    .op-hero-top { display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+      justify-content: space-between; }
+    .op-bar { height: 8px; background: var(--surface-2); border-radius: 99px; overflow: hidden;
+      margin-top: 14px; }
+    .op-bar > div { height: 100%; background: var(--primary); border-radius: 99px;
+      transition: width .3s; }
+    .op-grid { display: grid; gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+    .op-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px; cursor: pointer; transition: border-color .15s, transform .1s;
+      display: flex; gap: 12px; align-items: flex-start; }
+    .op-card:hover { border-color: var(--primary); }
+    .op-card:active { transform: scale(.99); }
+    .op-card.done { border-color: rgba(34,197,94,.4); }
+    .op-ico { font-size: 1.2rem; line-height: 1; margin-top: 2px; }
+    .op-card h3 { font-size: .92rem; margin: 0 0 3px; }
+    .op-card p { font-size: .76rem; color: var(--text-secondary); margin: 0; }
+    .op-note { background: rgba(234,179,8,.08); border: 1px solid rgba(234,179,8,.28);
+      border-radius: 9px; padding: 11px 14px; font-size: .8rem; margin-bottom: 14px;
+      line-height: 1.5; }
+    .op-back { background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      font-size: .82rem; padding: 0; margin-bottom: 12px; }
+    .op-back:hover { color: var(--text); }
+    .num-in { width: 110px; text-align: right; }
+    @media (max-width: 640px) {
+      .op-grid { grid-template-columns: 1fr; }
+      .table-wrap table { font-size: .8rem; }
+    }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div>
+      <h1>Açılış / Gerçek Başlangıç</h1>
+      <p style="color:var(--text-secondary);font-size:.82rem;margin:4px 0 0">
+        Sistemin kullanılmaya başlanacağı gün Decco'nun gerçek fiziksel ve finansal durumu
+      </p>
+    </div>
+  </div>
+  <div id="view"><div class="card" style="padding:32px;text-align:center;color:var(--text-secondary)">Yükleniyor...</div></div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('opening')
+
+const SECTIONS = {
+  materials:      { icon: '🧵', label: 'Ham madde sayımı' },
+  finished_goods: { icon: '🎒', label: 'Hazır ürün sayımı' },
+  accounts:       { icon: '🏦', label: 'Kasa / Banka' },
+  receivables:    { icon: '📥', label: 'Müşteri alacakları' },
+  supplier_debts: { icon: '🏭', label: 'Tedarikçi borçları' },
+  founder:        { icon: '🤝', label: 'Kurucu finansmanı' },
+  assets:         { icon: '🗄️', label: 'Demirbaşlar' },
+  go_live:        { icon: '📅', label: 'Go-live tarihi' },
+}
+
+let state = null
+const $ = id => document.getElementById(id)
+const el = h => { const d = document.createElement('div'); d.innerHTML = h; return d }
+const numOrNull = v => v === '' || v === null || v === undefined ? null : parseFloat(v)
+
+async function load() {
+  state = await api('/opening')
+  if (state.state === 'locked') return renderLocked()
+  renderHome()
+}
+
+// --- Ana ekran --------------------------------------------------------------
+
+function renderHome() {
+  const { session, checklist, progress, done, total } = state
+  const badge = state.state === 'ready'
+    ? '<span class="chip chip-green">Hazır</span>'
+    : '<span class="chip chip-yellow">Açılış henüz tamamlanmadı</span>'
+
+  $('view').innerHTML = `
+    <div class="op-hero">
+      <div class="op-hero-top">
+        <div>
+          <div style="font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Go-live tarihi</div>
+          <input type="date" id="golive" class="form-input" style="width:180px"
+            value="${session.go_live_date ? String(session.go_live_date).slice(0,10) : ''}" />
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:2rem;font-weight:700;line-height:1">${progress}<span style="font-size:1rem">%</span></div>
+          <div style="margin-top:6px">${badge}</div>
+        </div>
+      </div>
+      <div class="op-bar"><div style="width:${progress}%"></div></div>
+      <div style="font-size:.78rem;color:var(--text-secondary);margin-top:8px">${done} / ${total} bölüm tamamlandı</div>
+    </div>
+
+    <div class="op-note">
+      <strong>PRE-OPENING modu.</strong> Açılış kilitlenene kadar canlı stok ve para hareketleri
+      (stok girişi, ödeme, satın alma, üretim tamamlama) engellenir. Böylece sayım günlük
+      hareketlerle karışmaz. Tarihsel kayıtlar bu ekrandan değiştirilmez.
+    </div>
+
+    <div class="op-grid">
+      ${checklist.map(c => `
+        <div class="op-card ${c.done ? 'done' : ''}" data-key="${c.key}">
+          <div class="op-ico">${c.done ? '✅' : '⏳'}</div>
+          <div style="min-width:0;flex:1">
+            <h3>${SECTIONS[c.key]?.icon || ''} ${c.label}</h3>
+            <p>${c.detail}</p>
+          </div>
+        </div>`).join('')}
+    </div>
+
+    <div class="card" style="margin-top:16px;padding:18px">
+      <h3 style="margin:0 0 4px;font-size:.95rem">Açılışı Kilitle</h3>
+      <p style="font-size:.8rem;color:var(--text-secondary);margin:0 0 14px">
+        Yalnızca doğrulanmış gerçek bakiyeler sisteme işlenir. Tarihsel satış ve giderler
+        yeniden oluşturulmaz. Bu işlem geri alınamaz.
+      </p>
+      <button class="btn btn-primary" id="lock-btn" ${state.state === 'ready' ? '' : 'disabled'}>
+        🔒 Açılışı Kilitle
+      </button>
+      ${state.state === 'ready' ? '' :
+        `<div style="font-size:.76rem;color:var(--text-secondary);margin-top:9px">
+          Eksik: ${checklist.filter(c => !c.done).map(c => c.label).join(', ')}
+        </div>`}
+    </div>`
+
+  $('golive').onchange = async e => {
+    await api('/opening/session', { method: 'PUT', body: { go_live_date: e.target.value } })
+    toast('Go-live tarihi kaydedildi'); load()
+  }
+  document.querySelectorAll('.op-card').forEach(c =>
+    c.onclick = () => openSection(c.dataset.key))
+  $('lock-btn').onclick = confirmLock
+}
+
+function renderLocked() {
+  const d = state.session.locked_at
+  $('view').innerHTML = `
+    <div class="card" style="padding:40px;text-align:center">
+      <div style="font-size:2.6rem;margin-bottom:12px">🔒</div>
+      <h2 style="margin:0 0 8px;font-size:1.15rem">Açılış kilitlendi</h2>
+      <p style="color:var(--text-secondary);font-size:.85rem;margin:0">
+        Go-live: <strong>${fmtDate(state.session.go_live_date)}</strong><br/>
+        Kilitlenme: ${fmtDate(d)}
+      </p>
+      <p style="color:var(--text-secondary);font-size:.8rem;margin-top:18px;max-width:460px;margin-left:auto;margin-right:auto">
+        Sistem canlı modda. Açılış kayıtları <code>OPENING</code> referansıyla izlenebilir;
+        günlük hareketlerle karışmaz.
+      </p>
+    </div>`
+}
+
+// --- Bölüm yönlendirme ------------------------------------------------------
+
+const back = `<button class="op-back" onclick="window.__back()">← Açılış özetine dön</button>`
+window.__back = () => load()
+
+async function openSection(key) {
+  const fn = {
+    materials: secMaterials, finished_goods: secFinished, accounts: secAccounts,
+    receivables: secReceivables, supplier_debts: secSuppliers, founder: secFounder,
+    assets: secAssets, go_live: () => { load(); setTimeout(() => $('golive')?.focus(), 100) },
+  }[key]
+  if (fn) await fn()
+}
+
+// --- 1. Ham madde -----------------------------------------------------------
+
+async function secMaterials() {
+  const rows = await api('/opening/materials')
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      Excel'de miktarın 0 olması <strong>"stok yok" demek değildir</strong> — bu kalemler fiziksel
+      sayım bekliyor. Miktar alanı <strong>boş bırakılırsa "sayılmadı"</strong> sayılır ve açılış
+      stok hareketi oluşmaz. Gerçekten sıfırsa <strong>0</strong> yazın.
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>SKU</th><th>Malzeme</th><th>Birim</th><th>Konum</th>
+        <th style="text-align:right">Sayım</th><th style="text-align:right">Birim maliyet</th>
+        <th style="text-align:right">Toplam değer</th><th>Durum</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr data-id="${r.id}">
+          <td><code>${r.sku}</code></td>
+          <td>${r.name}</td>
+          <td class="td-muted">${r.unit}</td>
+          <td><input class="form-input f-loc" style="width:110px" value="${r.location || ''}" /></td>
+          <td style="text-align:right"><input class="form-input num-in f-qty" type="number" step="0.0001"
+            placeholder="sayılmadı" value="${r.counted_qty ?? ''}" /></td>
+          <td style="text-align:right"><input class="form-input num-in f-cost" type="number" step="0.01"
+            value="${r.unit_cost ?? ''}" /></td>
+          <td style="text-align:right" class="f-total">${r.counted_at ? money(r.total_value) : '—'}</td>
+          <td>${r.counted_at
+            ? '<span class="chip chip-green">Sayıldı</span>'
+            : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
+        </tr>`).join('')}</tbody>
+    </table></div></div>`
+
+  document.querySelectorAll('tr[data-id]').forEach(tr => {
+    const save = async () => {
+      const body = {
+        counted_qty: numOrNull(tr.querySelector('.f-qty').value),
+        unit_cost:   numOrNull(tr.querySelector('.f-cost').value),
+        location:    tr.querySelector('.f-loc').value,
+      }
+      await api(`/opening/materials/${tr.dataset.id}`, { method: 'PUT', body })
+      secMaterials()
+    }
+    tr.querySelectorAll('.f-qty,.f-cost,.f-loc').forEach(i => i.onchange = save)
+  })
+}
+
+// --- 2. Hazır ürün ----------------------------------------------------------
+
+async function secFinished() {
+  const [lots, products, materials] = await Promise.all([
+    api('/opening/finished'), api('/products'), api('/materials')])
+  const leathers = materials.filter(m => m.material_type === 'leather')
+  const confirmed = !!state.session.confirmations?.finished_goods
+
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      Geçiş tarihinde fiziksel olarak elde bulunan hazır ürünler. Renk/deri ayrı ürün varyantı
+      <strong>değildir</strong> — malzeme konfigürasyonu MAIN_LEATHER / SECONDARY_LEATHER
+      slotlarında saklanır. Örnek: PF001 / Kaşmir Yeşil / 2 adet.
+    </div>
+    <div class="page-header" style="margin-bottom:12px">
+      <h2 style="font-size:1rem;margin:0">Hazır ürün lotları</h2>
+      <button class="btn btn-primary" id="add">+ Lot Ekle</button>
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Ürün</th><th>Ana deri</th><th>İkincil deri</th><th style="text-align:right">Adet</th>
+        <th style="text-align:right">Birim maliyet</th><th>Konum</th><th>Not</th><th></th></tr></thead>
+      <tbody>${lots.length ? lots.map(l => {
+        const s = l.material_config?.slots || {}
+        return `<tr>
+          <td><code>${l.product_code}</code> ${l.product_name}</td>
+          <td>${s.MAIN_LEATHER?.sku || '—'}</td>
+          <td class="td-muted">${s.SECONDARY_LEATHER?.sku || '—'}</td>
+          <td style="text-align:right">${l.counted_qty}</td>
+          <td style="text-align:right">${money(l.unit_cost)}</td>
+          <td class="td-muted">${l.location}</td>
+          <td class="td-muted">${l.notes || ''}</td>
+          <td><button class="btn btn-sm" data-del="${l.id}">Sil</button></td>
+        </tr>`}).join('')
+        : `<tr><td colspan="8" class="td-muted" style="text-align:center;padding:26px">
+             Hazır ürün girilmedi. Elde hiç hazır ürün yoksa aşağıdan onaylayın.</td></tr>`}
+      </tbody>
+    </table></div></div>
+    <div class="card" style="margin-top:12px;padding:14px">
+      <label style="display:flex;gap:9px;align-items:center;cursor:pointer;font-size:.85rem">
+        <input type="checkbox" id="conf" ${confirmed ? 'checked' : ''} />
+        Hazır ürün sayımı tamamlandı (elde hiç hazır ürün yoksa da işaretleyin)
+      </label>
+    </div>`
+
+  $('conf').onchange = async e => {
+    await api('/opening/session', { method: 'PUT',
+      body: { confirm: { key: 'finished_goods', value: e.target.checked } } })
+    state = await api('/opening'); toast('Kaydedildi')
+  }
+  $('add').onclick = () => lotForm(products, leathers)
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    await api(`/opening/finished/${b.dataset.del}`, { method: 'DELETE' })
+    toast('Lot silindi'); secFinished()
+  })
+}
+
+function lotForm(products, leathers) {
+  const opts = a => a.map(x => `<option value="${x.id}">${x.code || x.sku} — ${x.name}</option>`).join('')
+  openModal(`
+    <div class="modal-header"><h2>Hazır Ürün Lotu</h2>
+      <button class="modal-close" onclick="window.__close()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>Ürün *</label>
+        <select id="l-prod" class="form-input"><option value="">Seçin</option>${opts(products)}</select></div>
+      <div class="form-row">
+        <div class="form-group"><label>Ana deri (MAIN_LEATHER) *</label>
+          <select id="l-main" class="form-input"><option value="">Seçin</option>${opts(leathers)}</select></div>
+        <div class="form-group"><label>İkincil deri (SECONDARY_LEATHER)</label>
+          <select id="l-sec" class="form-input"><option value="">Yok</option>${opts(leathers)}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Adet *</label>
+          <input id="l-qty" class="form-input" type="number" min="1" value="1" /></div>
+        <div class="form-group"><label>Birim maliyet</label>
+          <input id="l-cost" class="form-input" type="number" step="0.01" value="0" /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Konum</label>
+          <input id="l-loc" class="form-input" value="ATOLYE" /></div>
+        <div class="form-group"><label>Not</label>
+          <input id="l-notes" class="form-input" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="window.__close()">İptal</button>
+      <button class="btn btn-primary" id="l-save">Kaydet</button>
+    </div>`)
+  $('l-save').onclick = async () => {
+    const body = {
+      product_id: parseInt($('l-prod').value, 10),
+      main_leather_id: parseInt($('l-main').value, 10) || null,
+      secondary_leather_id: parseInt($('l-sec').value, 10) || null,
+      quantity: parseInt($('l-qty').value, 10),
+      unit_cost: parseFloat($('l-cost').value) || 0,
+      location: $('l-loc').value, notes: $('l-notes').value,
+    }
+    if (!body.product_id || !body.main_leather_id) return toast('Ürün ve ana deri zorunlu', 'error')
+    try {
+      await api('/opening/finished', { method: 'POST', body })
+      closeModal(); toast('Lot eklendi'); secFinished()
+    } catch (e) { toast(e.message, 'error') }
+  }
+}
+window.__close = () => closeModal()
+
+// --- 3. Kasa / Banka --------------------------------------------------------
+
+async function secAccounts() {
+  const rows = await api('/opening/accounts')
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      Gerçek açılış bakiyelerini elle girin. Tarihsel <strong>53.298 TL tahsilat buraya
+      aktarılmaz</strong> — o geçmişte tahsil edilen toplamdır, bugünkü para değildir.
+      Bakiye doğrudan yazılmaz; kilitte <code>opening_balance</code> hareketi üzerinden oluşur.
+    </div>
+    ${lineTable(rows, r => `<td>${r.name} <span class="td-muted">(${r.account_type})</span></td>`,
+      'Açılış tutarı')}`
+  wireLines(secAccounts)
+}
+
+// --- 4. Müşteri alacakları --------------------------------------------------
+
+async function secReceivables() {
+  const rows = await api('/opening/receivables')
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      Tarihsel sistemde açık görünen ${rows.length} sipariş. <strong>Siz onaylamadan açılış
+      alacağı oluşturulmaz.</strong> Tarihsel sipariş kaydı (ödenen tutar) değiştirilmez;
+      teyidiniz ayrı bir OPENING kaydı olarak tutulur.
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th>
+        <th style="text-align:right">Tarihsel kalan</th>
+        <th style="text-align:right">Gerçek kalan</th><th>Durum</th><th></th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr data-id="${r.id}">
+          <td class="td-muted">${(r.order_ref || '').split(' · ')[0]}</td>
+          <td>${r.customer_name}</td>
+          <td class="td-muted">${fmtDate(r.order_date)}</td>
+          <td style="text-align:right" class="td-muted">${money(r.previous_value)}</td>
+          <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+            value="${r.amount ?? ''}" ${r.status === 'closed' ? 'disabled' : ''} /></td>
+          <td>${r.status === 'confirmed' ? '<span class="chip chip-green">Teyit edildi</span>'
+             : r.status === 'closed' ? '<span class="chip chip-gray">Kapandı</span>'
+             : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-sm" data-act="confirmed" data-id="${r.id}">Hâlâ alacak</button>
+            <button class="btn btn-sm" data-act="closed" data-id="${r.id}">Kapandı</button>
+          </td>
+        </tr>`).join('')}</tbody>
+    </table></div></div>`
+
+  document.querySelectorAll('.f-amt').forEach(i => i.onchange = async e => {
+    const id = e.target.closest('tr').dataset.id
+    await api(`/opening/lines/${id}`, { method: 'PUT', body: { amount: numOrNull(e.target.value) } })
+    secReceivables()
+  })
+  document.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
+    const tr = b.closest('tr')
+    const amount = b.dataset.act === 'closed' ? 0 : numOrNull(tr.querySelector('.f-amt').value)
+    await api(`/opening/lines/${b.dataset.id}`, { method: 'PUT',
+      body: { amount, status: b.dataset.act } })
+    toast('Kaydedildi'); secReceivables()
+  })
+}
+
+// --- 5. Tedarikçi borçları --------------------------------------------------
+
+async function secSuppliers() {
+  const rows = await api('/opening/suppliers')
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      Gerçek kalan borcu elle girin. <strong>Geçmiş satın almaların toplamından otomatik borç
+      hesaplanmaz</strong> — yandaki tarihsel harcama yalnızca referans içindir.
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Tedarikçi</th><th style="text-align:right">Tarihsel harcama</th>
+        <th style="text-align:right">Gerçek kalan borç</th><th>Not / vade</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr data-id="${r.id}">
+          <td>${r.name}</td>
+          <td style="text-align:right" class="td-muted">${money(r.historical_spend)}</td>
+          <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+            placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
+          <td><input class="form-input f-notes" value="${r.notes || ''}" placeholder="vade / açıklama" /></td>
+        </tr>`).join('')}</tbody>
+    </table></div></div>`
+  wireLines(secSuppliers)
+}
+
+// --- 6. Kurucu finansmanı ---------------------------------------------------
+
+async function secFounder() {
+  const r = await api('/opening/founder')
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      <strong>Decco'nun Ahmet'e bugün itibarıyla gerçek borcu.</strong> Tarihsel kişisel
+      harcamaların tamamı otomatik olarak kurucu finansmanı sayılmaz. Go-live günü fiilen
+      yeni para yatırılmadığı için bu tutar <code>founder_funding</code> geliri olarak değil,
+      <strong>OPENING yükümlülüğü</strong> olarak kaydedilir — kasaya para eklenmez.
+    </div>
+    <div class="card" style="padding:18px;max-width:440px">
+      <div class="form-group">
+        <label>Gerçek borç tutarı (TL) *</label>
+        <input id="f-amt" class="form-input" type="number" step="0.01"
+          placeholder="onaylanmadı" value="${r?.amount ?? ''}" />
+      </div>
+      <div class="form-group">
+        <label>Not</label>
+        <textarea id="f-notes" class="form-input" rows="3">${r?.notes || ''}</textarea>
+      </div>
+      <button class="btn btn-primary" id="f-save">Tutarı Onayla</button>
+    </div>`
+  $('f-save').onclick = async () => {
+    await api(`/opening/lines/${r.id}`, { method: 'PUT', body: {
+      amount: numOrNull($('f-amt').value), status: 'confirmed', notes: $('f-notes').value } })
+    toast('Kurucu finansmanı onaylandı'); secFounder()
+  }
+}
+
+// --- 7. Demirbaşlar ---------------------------------------------------------
+
+async function secAssets() {
+  const rows = await api('/opening/assets')
+  const confirmed = !!state.session.confirmations?.assets
+  const totalCost = rows.reduce((s, a) => s + parseFloat(a.purchase_cost || 0), 0)
+  const totalCarry = rows.reduce((s, a) => s + parseFloat(a.opening_carrying_value || 0), 0)
+
+  $('view').innerHTML = `${back}
+    <div class="op-note">
+      <strong>Tarihsel demirbaş adayı toplamı: 61.810,00 TL — gerçek açılış değeri değildir.</strong>
+      Tek kalemde açılışa yazılmaz. Elde gerçekten bulunan demirbaşları tek tek ekleyin.
+      Demirbaş kaydı para/gider hareketi yaratmaz. Geçmiş alımlarda amortisman go-live'da
+      sıfırdan başlamasın diye birikmiş amortisman ve net defter değeri ayrıca tutulur.
+    </div>
+    <div class="page-header" style="margin-bottom:12px">
+      <h2 style="font-size:1rem;margin:0">Demirbaşlar —
+        <span class="td-muted" style="font-weight:400;font-size:.85rem">
+          alış ${money(totalCost)} · net defter ${money(totalCarry)}</span></h2>
+      <button class="btn btn-primary" id="add">+ Demirbaş Ekle</button>
+    </div>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Demirbaş</th><th>Kategori</th><th>Kullanıma başlama</th>
+        <th style="text-align:right">Alış maliyeti</th><th style="text-align:right">Birikmiş amort.</th>
+        <th style="text-align:right">Net defter değeri</th><th>Durum</th><th></th></tr></thead>
+      <tbody>${rows.length ? rows.map(a => `
+        <tr>
+          <td>${a.name}</td><td class="td-muted">${a.category || '—'}</td>
+          <td class="td-muted">${a.in_service_date ? fmtDate(a.in_service_date) : '—'}</td>
+          <td style="text-align:right">${money(a.purchase_cost)}</td>
+          <td style="text-align:right" class="td-muted">${money(a.opening_accumulated_depreciation)}</td>
+          <td style="text-align:right"><strong>${money(a.opening_carrying_value)}</strong></td>
+          <td>${a.status === 'active' ? '<span class="chip chip-green">Mevcut</span>'
+             : '<span class="chip chip-gray">Elden çıkarıldı</span>'}</td>
+          <td><button class="btn btn-sm" data-del="${a.id}">Sil</button></td>
+        </tr>`).join('')
+        : `<tr><td colspan="8" class="td-muted" style="text-align:center;padding:26px">
+             Demirbaş girilmedi. Elde demirbaş yoksa aşağıdan onaylayın.</td></tr>`}
+      </tbody>
+    </table></div></div>
+    <div class="card" style="margin-top:12px;padding:14px">
+      <label style="display:flex;gap:9px;align-items:center;cursor:pointer;font-size:.85rem">
+        <input type="checkbox" id="conf" ${confirmed ? 'checked' : ''} />
+        Demirbaşlar doğrulandı (elde demirbaş yoksa da işaretleyin)
+      </label>
+    </div>`
+
+  $('conf').onchange = async e => {
+    await api('/opening/session', { method: 'PUT',
+      body: { confirm: { key: 'assets', value: e.target.checked } } })
+    state = await api('/opening'); toast('Kaydedildi')
+  }
+  $('add').onclick = assetForm
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    await api(`/opening/assets/${b.dataset.del}`, { method: 'DELETE' })
+    toast('Demirbaş silindi'); secAssets()
+  })
+}
+
+function assetForm() {
+  openModal(`
+    <div class="modal-header"><h2>Demirbaş Ekle</h2>
+      <button class="modal-close" onclick="window.__close()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>Demirbaş adı *</label>
+        <input id="a-name" class="form-input" /></div>
+      <div class="form-row">
+        <div class="form-group"><label>Kategori</label>
+          <input id="a-cat" class="form-input" placeholder="Makine, Mobilya, Bilişim..." /></div>
+        <div class="form-group"><label>Durum</label>
+          <select id="a-status" class="form-input">
+            <option value="active">Mevcut</option>
+            <option value="disposed">Elden çıkarıldı</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Alış tarihi (biliniyorsa)</label>
+          <input id="a-pdate" class="form-input" type="date" /></div>
+        <div class="form-group"><label>Alış maliyeti</label>
+          <input id="a-cost" class="form-input" type="number" step="0.01" value="0" /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Kullanıma başlama</label>
+          <input id="a-sdate" class="form-input" type="date" /></div>
+        <div class="form-group"><label>Faydalı ömür (ay)</label>
+          <input id="a-life" class="form-input" type="number" placeholder="60" /></div>
+      </div>
+      <div class="op-note" style="margin:4px 0 12px" id="a-prev">
+        Birikmiş amortisman go-live tarihine göre hesaplanır; aşağıdan elle değiştirebilirsiniz.
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Açılış birikmiş amortismanı</label>
+          <input id="a-acc" class="form-input" type="number" step="0.01" /></div>
+        <div class="form-group"><label>Açılış net defter değeri</label>
+          <input id="a-carry" class="form-input" type="number" step="0.01" /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Ödeme kaynağı (biliniyorsa)</label>
+          <input id="a-pay" class="form-input" /></div>
+        <div class="form-group"><label>Not</label>
+          <input id="a-notes" class="form-input" /></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="window.__close()">İptal</button>
+      <button class="btn btn-primary" id="a-save">Kaydet</button>
+    </div>`, 'modal-lg')
+
+  const recalc = async () => {
+    const r = await api('/opening/assets/preview', { method: 'POST', body: {
+      purchase_cost: parseFloat($('a-cost').value) || 0,
+      in_service_date: $('a-sdate').value || null,
+      useful_life_months: parseInt($('a-life').value, 10) || null } })
+    $('a-acc').value = r.accumulated
+    $('a-carry').value = r.carrying
+    $('a-prev').innerHTML = `Hesaplanan: birikmiş amortisman <strong>${money(r.accumulated)}</strong>,
+      net defter değeri <strong>${money(r.carrying)}</strong>. Gerekirse elle düzeltin.`
+  }
+  ;['a-cost', 'a-sdate', 'a-life'].forEach(id => $(id).onchange = recalc)
+
+  $('a-save').onclick = async () => {
+    if (!$('a-name').value.trim()) return toast('Demirbaş adı zorunlu', 'error')
+    await api('/opening/assets', { method: 'POST', body: {
+      name: $('a-name').value.trim(), category: $('a-cat').value || null,
+      purchase_date: $('a-pdate').value || null,
+      purchase_cost: parseFloat($('a-cost').value) || 0,
+      in_service_date: $('a-sdate').value || null,
+      useful_life_months: parseInt($('a-life').value, 10) || null,
+      opening_accumulated_depreciation: numOrNull($('a-acc').value),
+      opening_carrying_value: numOrNull($('a-carry').value),
+      payment_source: $('a-pay').value || null, status: $('a-status').value,
+      notes: $('a-notes').value || null } })
+    closeModal(); toast('Demirbaş eklendi'); secAssets()
+  }
+}
+
+// --- Ortak tutar tablosu (kasa / tedarikçi) ---------------------------------
+
+function lineTable(rows, firstCell, amountLabel) {
+  return `<div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>Kalem</th><th style="text-align:right">${amountLabel}</th><th>Not</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr data-id="${r.id}">
+        ${firstCell(r)}
+        <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+          placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
+        <td><input class="form-input f-notes" value="${r.notes || ''}" /></td>
+      </tr>`).join('')}</tbody>
+  </table></div></div>`
+}
+
+function wireLines(reload) {
+  document.querySelectorAll('tr[data-id]').forEach(tr => {
+    const save = async () => {
+      await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: {
+        amount: numOrNull(tr.querySelector('.f-amt').value),
+        notes: tr.querySelector('.f-notes')?.value ?? null } })
+      reload()
+    }
+    tr.querySelectorAll('.f-amt,.f-notes').forEach(i => i.onchange = save)
+  })
+}
+
+// --- Kilit ------------------------------------------------------------------
+
+function confirmLock() {
+  openModal(`
+    <div class="modal-header"><h2>Açılışı Kilitle</h2>
+      <button class="modal-close" onclick="window.__close()">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:.86rem;line-height:1.6;margin:0 0 12px">
+        Go-live <strong>${fmtDate(state.session.go_live_date)}</strong> tarihiyle
+        şunlar işlenecek:</p>
+      <ul style="font-size:.83rem;line-height:1.8;color:var(--text-secondary);margin:0 0 14px;padding-left:20px">
+        <li>Sayılan ham maddeler için <code>opening_in</code> stok hareketi</li>
+        <li>Hazır ürün lotları (<code>source=OPENING</code>)</li>
+        <li>Kasa/banka için <code>opening_balance</code> hareketi</li>
+        <li>Tedarikçi borçları ve kurucu yükümlülüğü</li>
+      </ul>
+      <div class="op-note" style="margin:0">
+        Tarihsel siparişler, ödemeler ve giderler <strong>değişmez</strong>; geçmiş satış/gider
+        yeniden oluşturulmaz. Tüm kayıtlar <code>OPENING</code> referansıyla izlenir ve veritabanı
+        kısıtlarıyla çift kayıt engellenir. <strong>Bu işlem geri alınamaz.</strong>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="window.__close()">Vazgeç</button>
+      <button class="btn btn-primary" id="do-lock">🔒 Kilitle</button>
+    </div>`)
+  $('do-lock').onclick = async () => {
+    try {
+      await api('/opening/lock', { method: 'POST' })
+      closeModal(); toast('Açılış kilitlendi — sistem canlı modda'); load()
+    } catch (e) { toast(e.message, 'error') }
+  }
+}
+
+load()
+</script>
+</body>
+</html>

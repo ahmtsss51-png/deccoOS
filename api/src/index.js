@@ -17,6 +17,8 @@ import recipesRouter from './routes/recipes.js'
 import settingsRouter from './routes/settings.js'
 import reportsRouter from './routes/reports.js'
 import authRouter from './routes/auth.js'
+import openingRouter from './routes/opening.js'
+import { requireOpened } from './opening-guard.js'
 import jwt from 'jsonwebtoken'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'decco-secret-2026'
@@ -55,7 +57,17 @@ app.use('/api/auth', authRouter)
 // Tüm diğer /api/* rotaları token gerektirir
 app.use('/api', requireAuth)
 
+// PRE-OPENING: açılış kilitlenene kadar canlı stok/para hareketi yapılamaz.
+// Tanım/kayıt uçları (ürün, malzeme, müşteri, sipariş oluşturma) serbest kalır.
+app.use('/api/materials/:id/movements', requireOpened)
+app.use('/api/orders/:id/payments', requireOpened)
+app.use('/api/production/:id/complete', requireOpened)
+app.use('/api/suppliers/purchases', requireOpened)
+app.use('/api/finance/transactions', requireOpened)
+app.use('/api/finance/transfer', requireOpened)
+
 // API routes
+app.use('/api/opening', openingRouter)
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/customers', customersRouter)
 app.use('/api/orders', ordersRouter)
@@ -75,6 +87,10 @@ app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
 
 // Global error handler
 app.use((err, _req, res, _next) => {
+  // Doğrulama hataları kendi durum kodunu ve mesajını taşır
+  if (err.status && err.status < 500) {
+    return res.status(err.status).json({ error: err.message })
+  }
   console.error(err)
   res.status(500).json({ error: 'Internal server error' })
 })

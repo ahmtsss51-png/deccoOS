@@ -133,6 +133,7 @@ export function renderSidebar(active) {
     ['finance',    '💰', 'Finans',       '/finance.html'],
     ['products',   '🎒', 'Ürünler',      '/products.html'],
     ['suppliers',  '🏭', 'Tedarikçiler', '/suppliers.html'],
+    ['opening',    '🚀', 'Açılış',       '/opening.html'],
     ['import',     '📂', 'Veri Aktarım', '/import.html'],
     ['reports',    '📈', 'Raporlar',     '/reports.html'],
     ['settings',   '⚙️', 'Ayarlar',      '/settings.html'],
