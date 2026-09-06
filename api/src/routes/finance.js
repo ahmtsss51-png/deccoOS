@@ -6,7 +6,7 @@ const router = Router()
 router.get('/summary', async (_req, res, next) => {
   try {
     const accounts = await query("SELECT SUM(balance) AS total FROM accounts WHERE is_active=TRUE AND account_type != 'founder'")
-    const receivable = await query("SELECT SUM(total_amount - paid_amount) AS total FROM orders WHERE status NOT IN ('cancelled','completed')")
+    const receivable = await query("SELECT SUM(total_amount - paid_amount) AS total FROM orders WHERE deleted_at IS NULL AND status <> 'cancelled' AND paid_amount < total_amount")
     const payable = await query('SELECT SUM(total_debt) AS total FROM suppliers')
     const thisMonth = await query(`
       SELECT

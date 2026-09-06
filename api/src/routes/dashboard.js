@@ -21,6 +21,7 @@ router.get('/', async (_req, res, next) => {
           COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled') AND delivery_date < NOW()) AS overdue,
           COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled')) AS open_total
         FROM orders
+        WHERE deleted_at IS NULL
       `),
 
       // Finans özeti
@@ -28,7 +29,7 @@ router.get('/', async (_req, res, next) => {
         SELECT
           (SELECT COALESCE(SUM(balance),0) FROM accounts WHERE is_active=TRUE AND account_type != 'founder') AS available_cash,
           -- Teslim edilmiş sipariş de ödenmemiş olabilir; sadece iptaller hariç
-          (SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM orders WHERE status <> 'cancelled' AND paid_amount < total_amount) AS customer_receivable,
+          (SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM orders WHERE deleted_at IS NULL AND status <> 'cancelled' AND paid_amount < total_amount) AS customer_receivable,
           (SELECT COALESCE(SUM(total_debt),0) FROM suppliers) AS supplier_payable,
           (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE amount > 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_income,
           (SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE amount < 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_expense

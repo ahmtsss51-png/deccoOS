@@ -36,7 +36,7 @@ router.put('/:id', async (req, res, next) => {
 router.get('/:id/purchases', async (req, res, next) => {
   try {
     const { rows } = await query(
-      'SELECT * FROM purchases WHERE supplier_id=$1 ORDER BY created_at DESC LIMIT 50',
+      'SELECT * FROM purchases WHERE supplier_id=$1 ORDER BY purchase_date DESC, id DESC LIMIT 50',
       [req.params.id]
     )
     res.json(rows)
@@ -67,7 +67,7 @@ router.post('/purchases', async (req, res, next) => {
       // Stok + ağırlıklı ortalama maliyet güncelle
       await client.query(`
         UPDATE materials SET
-          avg_cost = (current_stock * avg_cost + $1 * $2) / (current_stock + $1),
+          avg_cost = COALESCE((current_stock * avg_cost + $1 * $2) / NULLIF(current_stock + $1, 0), avg_cost),
           current_stock = current_stock + $1
         WHERE id=$3
       `, [line.quantity, line.unit_cost, line.material_id])

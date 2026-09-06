@@ -96,7 +96,7 @@ function renderHome() {
       <div class="op-hero-top">
         <div>
           <div style="font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Go-live tarihi</div>
-          <input type="date" id="golive" class="form-input" style="width:180px"
+          <input type="date" id="golive" class="form-control" style="width:180px"
             value="${session.go_live_date ? String(session.go_live_date).slice(0,10) : ''}" />
         </div>
         <div style="text-align:right">
@@ -199,10 +199,10 @@ async function secMaterials() {
           <td><code>${r.sku}</code></td>
           <td>${r.name}</td>
           <td class="td-muted">${r.unit}</td>
-          <td><input class="form-input f-loc" style="width:110px" value="${r.location || ''}" /></td>
-          <td style="text-align:right"><input class="form-input num-in f-qty" type="number" step="0.0001"
+          <td><input class="form-control f-loc" style="width:110px" value="${r.location || ''}" /></td>
+          <td style="text-align:right"><input class="form-control num-in f-qty" type="number" step="0.0001"
             placeholder="sayılmadı" value="${r.counted_qty ?? ''}" /></td>
-          <td style="text-align:right"><input class="form-input num-in f-cost" type="number" step="0.01"
+          <td style="text-align:right"><input class="form-control num-in f-cost" type="number" step="0.01"
             value="${r.unit_cost ?? ''}" /></td>
           <td style="text-align:right" class="f-total">${r.counted_at ? money(r.total_value) : '—'}</td>
           <td>${r.counted_at
@@ -288,24 +288,24 @@ function lotForm(products, leathers) {
       <button class="modal-close" onclick="window.__close()">✕</button></div>
     <div class="modal-body">
       <div class="form-group"><label>Ürün *</label>
-        <select id="l-prod" class="form-input"><option value="">Seçin</option>${opts(products)}</select></div>
+        <select id="l-prod" class="form-control"><option value="">Seçin</option>${opts(products)}</select></div>
       <div class="form-row">
         <div class="form-group"><label>Ana deri (MAIN_LEATHER) *</label>
-          <select id="l-main" class="form-input"><option value="">Seçin</option>${opts(leathers)}</select></div>
+          <select id="l-main" class="form-control"><option value="">Seçin</option>${opts(leathers)}</select></div>
         <div class="form-group"><label>İkincil deri (SECONDARY_LEATHER)</label>
-          <select id="l-sec" class="form-input"><option value="">Yok</option>${opts(leathers)}</select></div>
+          <select id="l-sec" class="form-control"><option value="">Yok</option>${opts(leathers)}</select></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Adet *</label>
-          <input id="l-qty" class="form-input" type="number" min="1" value="1" /></div>
+          <input id="l-qty" class="form-control" type="number" min="1" value="1" /></div>
         <div class="form-group"><label>Birim maliyet</label>
-          <input id="l-cost" class="form-input" type="number" step="0.01" value="0" /></div>
+          <input id="l-cost" class="form-control" type="number" step="0.01" value="0" /></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Konum</label>
-          <input id="l-loc" class="form-input" value="ATOLYE" /></div>
+          <input id="l-loc" class="form-control" value="ATOLYE" /></div>
         <div class="form-group"><label>Not</label>
-          <input id="l-notes" class="form-input" /></div>
+          <input id="l-notes" class="form-control" /></div>
       </div>
     </div>
     <div class="modal-footer">
@@ -365,7 +365,7 @@ async function secReceivables() {
           <td>${r.customer_name}</td>
           <td class="td-muted">${fmtDate(r.order_date)}</td>
           <td style="text-align:right" class="td-muted">${money(r.previous_value)}</td>
-          <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+          <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
             value="${r.amount ?? ''}" ${r.status === 'closed' ? 'disabled' : ''} /></td>
           <td>${r.status === 'confirmed' ? '<span class="chip chip-green">Teyit edildi</span>'
              : r.status === 'closed' ? '<span class="chip chip-gray">Kapandı</span>'
@@ -407,9 +407,9 @@ async function secSuppliers() {
         <tr data-id="${r.id}">
           <td>${r.name}</td>
           <td style="text-align:right" class="td-muted">${money(r.historical_spend)}</td>
-          <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+          <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
             placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
-          <td><input class="form-input f-notes" value="${r.notes || ''}" placeholder="vade / açıklama" /></td>
+          <td><input class="form-control f-notes" value="${r.notes || ''}" placeholder="vade / açıklama" /></td>
         </tr>`).join('')}</tbody>
     </table></div></div>`
   wireLines(secSuppliers)
@@ -429,12 +429,12 @@ async function secFounder() {
     <div class="card" style="padding:18px;max-width:440px">
       <div class="form-group">
         <label>Gerçek borç tutarı (TL) *</label>
-        <input id="f-amt" class="form-input" type="number" step="0.01"
+        <input id="f-amt" class="form-control" type="number" step="0.01"
           placeholder="onaylanmadı" value="${r?.amount ?? ''}" />
       </div>
       <div class="form-group">
         <label>Not</label>
-        <textarea id="f-notes" class="form-input" rows="3">${r?.notes || ''}</textarea>
+        <textarea id="f-notes" class="form-control" rows="3">${r?.notes || ''}</textarea>
       </div>
       <button class="btn btn-primary" id="f-save">Tutarı Onayla</button>
     </div>`
@@ -510,41 +510,41 @@ function assetForm() {
       <button class="modal-close" onclick="window.__close()">✕</button></div>
     <div class="modal-body">
       <div class="form-group"><label>Demirbaş adı *</label>
-        <input id="a-name" class="form-input" /></div>
+        <input id="a-name" class="form-control" /></div>
       <div class="form-row">
         <div class="form-group"><label>Kategori</label>
-          <input id="a-cat" class="form-input" placeholder="Makine, Mobilya, Bilişim..." /></div>
+          <input id="a-cat" class="form-control" placeholder="Makine, Mobilya, Bilişim..." /></div>
         <div class="form-group"><label>Durum</label>
-          <select id="a-status" class="form-input">
+          <select id="a-status" class="form-control">
             <option value="active">Mevcut</option>
             <option value="disposed">Elden çıkarıldı</option></select></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Alış tarihi (biliniyorsa)</label>
-          <input id="a-pdate" class="form-input" type="date" /></div>
+          <input id="a-pdate" class="form-control" type="date" /></div>
         <div class="form-group"><label>Alış maliyeti</label>
-          <input id="a-cost" class="form-input" type="number" step="0.01" value="0" /></div>
+          <input id="a-cost" class="form-control" type="number" step="0.01" value="0" /></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Kullanıma başlama</label>
-          <input id="a-sdate" class="form-input" type="date" /></div>
+          <input id="a-sdate" class="form-control" type="date" /></div>
         <div class="form-group"><label>Faydalı ömür (ay)</label>
-          <input id="a-life" class="form-input" type="number" placeholder="60" /></div>
+          <input id="a-life" class="form-control" type="number" placeholder="60" /></div>
       </div>
       <div class="op-note" style="margin:4px 0 12px" id="a-prev">
         Birikmiş amortisman go-live tarihine göre hesaplanır; aşağıdan elle değiştirebilirsiniz.
       </div>
       <div class="form-row">
         <div class="form-group"><label>Açılış birikmiş amortismanı</label>
-          <input id="a-acc" class="form-input" type="number" step="0.01" /></div>
+          <input id="a-acc" class="form-control" type="number" step="0.01" /></div>
         <div class="form-group"><label>Açılış net defter değeri</label>
-          <input id="a-carry" class="form-input" type="number" step="0.01" /></div>
+          <input id="a-carry" class="form-control" type="number" step="0.01" /></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Ödeme kaynağı (biliniyorsa)</label>
-          <input id="a-pay" class="form-input" /></div>
+          <input id="a-pay" class="form-control" /></div>
         <div class="form-group"><label>Not</label>
-          <input id="a-notes" class="form-input" /></div>
+          <input id="a-notes" class="form-control" /></div>
       </div>
     </div>
     <div class="modal-footer">
@@ -588,9 +588,9 @@ function lineTable(rows, firstCell, amountLabel) {
     <tbody>${rows.map(r => `
       <tr data-id="${r.id}">
         ${firstCell(r)}
-        <td style="text-align:right"><input class="form-input num-in f-amt" type="number" step="0.01"
+        <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
           placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
-        <td><input class="form-input f-notes" value="${r.notes || ''}" /></td>
+        <td><input class="form-control f-notes" value="${r.notes || ''}" /></td>
       </tr>`).join('')}</tbody>
   </table></div></div>`
 }

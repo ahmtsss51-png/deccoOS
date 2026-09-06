@@ -50,7 +50,7 @@ router.get('/summary', async (req, res, next) => {
   try {
     const days = parseInt(req.query.days) || 30
     const [orders, production, customers, stock] = await Promise.all([
-      query(`SELECT COUNT(*) AS cnt, SUM(total_amount) AS total FROM orders WHERE created_at >= NOW() - INTERVAL '1 day' * $1 AND status != 'cancelled'`, [days]),
+      query(`SELECT COUNT(*) AS cnt, SUM(total_amount) AS total FROM orders WHERE deleted_at IS NULL AND order_date >= NOW() - INTERVAL '1 day' * $1 AND status != 'cancelled'`, [days]),
       query(`SELECT COUNT(*) AS cnt FROM production_jobs WHERE status='completed' AND created_at >= NOW() - INTERVAL '1 day' * $1`, [days]),
       query(`SELECT COUNT(*) AS cnt FROM customers WHERE created_at >= NOW() - INTERVAL '1 day' * $1`, [days]),
       query(`SELECT COUNT(*) AS critical FROM materials WHERE is_active=TRUE AND current_stock <= COALESCE(reorder_level, 0)`),

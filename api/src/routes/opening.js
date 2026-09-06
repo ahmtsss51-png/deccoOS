@@ -43,7 +43,7 @@ async function seedLines(sessionId) {
     INSERT INTO opening_lines (session_id, section, ref_key, order_id, amount, previous_value)
     SELECT $1, 'receivable', o.id::text, o.id,
            o.total_amount - o.paid_amount, o.total_amount - o.paid_amount
-    FROM orders o WHERE o.total_amount - o.paid_amount > 0
+    FROM orders o WHERE o.deleted_at IS NULL AND o.total_amount - o.paid_amount > 0
     ON CONFLICT (session_id, section, ref_key) DO NOTHING`, [sessionId])
 
   await query(`

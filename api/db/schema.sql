@@ -295,6 +295,108 @@ CREATE UNIQUE INDEX IF NOT EXISTS stock_movements_opening_uniq
 CREATE UNIQUE INDEX IF NOT EXISTS transactions_opening_uniq
   ON transactions (account_id, reference_id) WHERE transaction_type = 'opening_balance';
 
+-- ===========================================================================
+-- CARİ HESAP / SOFT DELETE GENİŞLETMELERİ
+-- ===========================================================================
+
+-- Müşteri: adres bilgileri + soft delete
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS city       VARCHAR(100);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS district   VARCHAR(100);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS address    TEXT;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS email      VARCHAR(200);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS is_active  BOOLEAN DEFAULT TRUE;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+-- Tarihsel aktarımda şehir notes içine yazılmıştı ("Şehir: NİĞDE · ..."),
+-- kendi kolonuna taşınır
+UPDATE customers
+SET city = INITCAP(TRIM(SPLIT_PART(SUBSTRING(notes FROM 'Şehir: ([^·]+)'), '·', 1)))
+WHERE city IS NULL AND notes ~ 'Şehir: ';
+
+-- Taşındıktan sonra nottaki "Şehir: X" öneki temizlenir, kalan not korunur
+UPDATE customers
+SET notes = NULLIF(TRIM(BOTH ' ·' FROM REGEXP_REPLACE(notes, 'Şehir: [^·]*(· ?)?', '')), '')
+WHERE city IS NOT NULL AND notes ~ 'Şehir: ';
+
+-- Sipariş: silme = iptal + kayıt kalır (tarihsel mutabakat korunur)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at    TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by    INT REFERENCES users(id);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delete_reason TEXT;
+CREATE INDEX IF NOT EXISTS orders_active_idx
+  ON orders (order_date DESC) WHERE deleted_at IS NULL;
+
+-- Tedarikçi: iletişim + soft delete
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS is_active  BOOLEAN DEFAULT TRUE;
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS email      VARCHAR(200);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS address    TEXT;
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS tax_no     VARCHAR(50);
+
+-- Tahsilat başlığı: bir tahsilat birden fazla siparişe dağıtılabilir
+CREATE TABLE IF NOT EXISTS customer_payments (
+  id          SERIAL PRIMARY KEY,
+  customer_id INT NOT NULL REFERENCES customers(id),
+  account_id  INT NOT NULL REFERENCES accounts(id),
+  amount      NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  method      VARCHAR(30),
+  description TEXT,
+  paid_at     TIMESTAMPTZ DEFAULT NOW(),
+  created_by  INT REFERENCES users(id),
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS customer_payment_allocations (
+  id         SERIAL PRIMARY KEY,
+  payment_id INT NOT NULL REFERENCES customer_payments(id) ON DELETE CASCADE,
+  order_id   INT NOT NULL REFERENCES orders(id),
+  amount     NUMERIC(14,2) NOT NULL CHECK (amount > 0)
+);
+
+-- Tedarikçiye borç ödemesi
+CREATE TABLE IF NOT EXISTS supplier_payments (
+  id          SERIAL PRIMARY KEY,
+  supplier_id INT NOT NULL REFERENCES suppliers(id),
+  account_id  INT NOT NULL REFERENCES accounts(id),
+  purchase_id INT REFERENCES purchases(id),   -- NULL = genel cari ödeme
+  amount      NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  description TEXT,
+  paid_at     TIMESTAMPTZ DEFAULT NOW(),
+  created_by  INT REFERENCES users(id),
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Tedarikçi iadesi. purchases'a negatif satır KOYULMAZ: ağırlıklı ortalama
+-- maliyet formülü negatif miktarda bozulur. İadede avg_cost sabit kalır.
+CREATE TABLE IF NOT EXISTS purchase_returns (
+  id           SERIAL PRIMARY KEY,
+  supplier_id  INT NOT NULL REFERENCES suppliers(id),
+  purchase_id  INT REFERENCES purchases(id),
+  total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  settlement   VARCHAR(20) NOT NULL DEFAULT 'debt',  -- debt | refund
+  account_id   INT REFERENCES accounts(id),
+  notes        TEXT,
+  return_date  TIMESTAMPTZ DEFAULT NOW(),
+  created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS purchase_return_lines (
+  id          SERIAL PRIMARY KEY,
+  return_id   INT NOT NULL REFERENCES purchase_returns(id) ON DELETE CASCADE,
+  material_id INT NOT NULL REFERENCES materials(id),
+  quantity    NUMERIC(12,4) NOT NULL CHECK (quantity > 0),
+  unit_cost   NUMERIC(12,4) NOT NULL
+);
+
+-- Sipariş silinince tahsilat ters kaydı hesap başına yalnız bir kez yazılabilir
+CREATE UNIQUE INDEX IF NOT EXISTS transactions_order_reversal_uniq
+  ON transactions (reference_id, account_id) WHERE reference_type = 'order_reversal';
+CREATE INDEX IF NOT EXISTS supplier_payments_sup_idx
+  ON supplier_payments (supplier_id, paid_at DESC);
+CREATE INDEX IF NOT EXISTS purchase_returns_sup_idx
+  ON purchase_returns (supplier_id, return_date DESC);
+CREATE INDEX IF NOT EXISTS cpa_order_idx
+  ON customer_payment_allocations (order_id);
+
 -- Varsayılan departmanlar
 INSERT INTO departments (name, color) VALUES
   ('Yönetim', 'purple'),

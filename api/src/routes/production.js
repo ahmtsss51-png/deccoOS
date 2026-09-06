@@ -55,7 +55,10 @@ router.post('/:id/complete', async (req, res, next) => {
 
     const { rows: jobRows } = await client.query('SELECT * FROM production_jobs WHERE id=$1', [req.params.id])
     const job = jobRows[0]
-    if (!job) return res.status(404).json({ error: 'Not found' })
+    if (!job) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Not found' })
+    }
 
     // Output oluştur
     const { rows: outputRows } = await client.query(

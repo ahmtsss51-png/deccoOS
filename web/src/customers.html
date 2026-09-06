@@ -30,12 +30,12 @@
       <table>
         <thead>
           <tr>
-            <th>Müşteri</th><th>Telefon</th><th>Kanal</th>
-            <th>Toplam Sipariş</th><th>Ödenen</th><th>Açık Bakiye</th><th>Son Sipariş</th>
+            <th>Müşteri</th><th>Telefon</th><th>Şehir</th><th>Kanal</th>
+            <th>Sipariş</th><th>Ödenen</th><th>Açık Bakiye</th><th>Son Sipariş</th><th></th>
           </tr>
         </thead>
         <tbody id="customers-body">
-          <tr><td colspan="7" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
+          <tr><td colspan="9" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
         </tbody>
       </table>
     </div>
@@ -59,68 +59,69 @@ async function load() {
   render(allCustomers)
 }
 
+const esc = s => String(s ?? '').replace(/[&<>"]/g, ch =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[ch]))
+
 function render(data) {
   const body = document.getElementById('customers-body')
   if (!data.length) {
-    body.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">👤</div><div>Henüz müşteri yok</div><p>Yeni müşteri ekleyerek başlayın.</p></div></td></tr>`
+    body.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">👤</div><div>Müşteri bulunamadı</div><p>Yeni müşteri ekleyerek başlayın.</p></div></td></tr>`
     return
   }
   body.innerHTML = data.map(c => {
     const bakiye = parseFloat(c.total_ordered||0) - parseFloat(c.total_paid||0)
-    return `<tr onclick="openDetail(${c.id})">
-      <td class="td-bold">${c.name}</td>
-      <td>${c.phone||'—'}</td>
+    return `<tr onclick="location.href='/customer-detail.html?id=${c.id}'">
+      <td class="td-bold">${esc(c.name)}</td>
+      <td>${esc(c.phone)||'—'}</td>
+      <td class="td-muted">${esc(c.city)||'—'}</td>
       <td>${channelChip(c.channel)}</td>
-      <td class="td-mono">${c.order_count||0} sipariş</td>
+      <td class="td-mono">${c.order_count||0}</td>
       <td class="td-mono">${money(c.total_paid)}</td>
       <td class="td-mono ${bakiye>0?'money-neg':''}">${bakiye>0?money(bakiye):'✓'}</td>
-      <td class="td-muted">${fmtDate(c.created_at)}</td>
+      <td class="td-muted">${fmtDate(c.last_order_date)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openEditCustomer(${c.id})">Düzenle</button>
+        <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmDelete(${c.id})">Sil</button>
+      </td>
     </tr>`
   }).join('')
+}
+
+window.confirmDelete = (id) => {
+  const c = allCustomers.find(x => x.id === id) || {}
+  const bakiye = parseFloat(c.total_ordered||0) - parseFloat(c.total_paid||0)
+  openModal(`
+    <div class="modal-header"><h3>Müşteriyi Sil</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:.87rem;line-height:1.6;margin:0">
+        <b>${esc(c.name)}</b> silinecek.
+        ${parseInt(c.order_count||0) > 0
+          ? `Bu müşterinin <b>${c.order_count} siparişi</b> var; kayıt arşivlenir,
+             sipariş geçmişi ve ciro raporları korunur.`
+          : 'Hiç siparişi yok, kayıt tamamen silinecek.'}
+      </p>
+      ${bakiye > 0 ? `<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:.82rem;margin-top:12px">
+        ⚠️ <b>${money(bakiye)}</b> açık alacağı var — silme reddedilecek.</div>` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Vazgeç</button>
+      <button class="btn btn-danger" onclick="doDelete(${id})">Evet, Sil</button>
+    </div>`)
+}
+
+window.doDelete = async (id) => {
+  try {
+    const r = await api(`/customers/${id}`, { method: 'DELETE' })
+    closeModal()
+    toast(r.hard_deleted ? 'Müşteri silindi' : 'Müşteri arşivlendi')
+    load()
+  } catch (e) { toast(e.message, 'error') }
 }
 
 window.filterCustomers = () => {
   const q = document.getElementById('search').value.toLowerCase()
   render(allCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.phone||'').includes(q)))
-}
-
-window.openDetail = async (id) => {
-  const c = await api(`/customers/${id}`)
-  const bakiye = c.orders.reduce((s,o) => s + parseFloat(o.total_amount||0) - parseFloat(o.paid_amount||0), 0)
-  openModal(`
-    <div class="modal-header">
-      <h3>${c.name}</h3>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="form-row" style="margin-bottom:14px">
-        <div><div class="kpi-label">Telefon</div><div>${c.phone||'—'}</div></div>
-        <div><div class="kpi-label">Kanal</div><div>${channelChip(c.channel)}</div></div>
-      </div>
-      <div class="form-row" style="margin-bottom:16px">
-        <div><div class="kpi-label">Toplam Alışveriş</div><div class="td-bold">${money(c.orders.reduce((s,o)=>s+parseFloat(o.total_amount||0),0))}</div></div>
-        <div><div class="kpi-label">Açık Bakiye</div><div class="td-bold ${bakiye>0?'money-neg':''}">${bakiye>0?money(bakiye):'Kapalı'}</div></div>
-      </div>
-      ${c.notes ? `<div class="form-group"><div class="kpi-label">Notlar</div><div>${c.notes}</div></div><hr class="divider"/>` : ''}
-      <div class="section-title" style="margin-bottom:10px">Sipariş Geçmişi</div>
-      ${c.orders.length ? `
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>#</th><th>Tarih</th><th>Tutar</th><th>Durum</th></tr></thead>
-          <tbody>${c.orders.map(o=>`<tr>
-            <td class="td-bold">#${o.id}</td>
-            <td class="td-muted">${fmtDate(o.created_at)}</td>
-            <td class="td-mono">${money(o.total_amount)}</td>
-            <td>${chip(o.status)}</td>
-          </tr>`).join('')}</tbody>
-        </table>
-      </div>` : `<div class="td-muted">Henüz sipariş yok.</div>`}
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-sm" onclick="openEditCustomer(${c.id})">Düzenle</button>
-      <button class="btn btn-secondary btn-sm" onclick="closeModal()">Kapat</button>
-    </div>
-  `, 'modal-lg')
 }
 
 window.openNewCustomer = () => customerForm()
@@ -138,12 +139,12 @@ function customerForm(c = null) {
     <div class="modal-body">
       <div class="form-group">
         <label class="form-label">Ad Soyad *</label>
-        <input id="f-name" class="form-control" value="${c?.name||''}" placeholder="Müşteri adı" />
+        <input id="f-name" class="form-control" value="${esc(c?.name)}" placeholder="Müşteri adı" />
       </div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Telefon</label>
-          <input id="f-phone" class="form-control" value="${c?.phone||''}" placeholder="05XX XXX XX XX" />
+          <input id="f-phone" class="form-control" value="${esc(c?.phone)}" placeholder="05XX XXX XX XX" />
         </div>
         <div class="form-group">
           <label class="form-label">Kanal</label>
@@ -153,9 +154,29 @@ function customerForm(c = null) {
           </select>
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">E-posta</label>
+          <input id="f-email" class="form-control" value="${esc(c?.email)}" placeholder="ornek@mail.com" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">İl</label>
+          <input id="f-city" class="form-control" value="${esc(c?.city)}" placeholder="İstanbul" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">İlçe</label>
+          <input id="f-district" class="form-control" value="${esc(c?.district)}" placeholder="Kadıköy" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Adres</label>
+          <input id="f-address" class="form-control" value="${esc(c?.address)}" placeholder="Mahalle, cadde, no..." />
+        </div>
+      </div>
       <div class="form-group">
         <label class="form-label">Notlar</label>
-        <textarea id="f-notes" class="form-control" rows="2" placeholder="Özel notlar...">${c?.notes||''}</textarea>
+        <textarea id="f-notes" class="form-control" rows="2" placeholder="Özel notlar...">${esc(c?.notes)}</textarea>
       </div>
     </div>
     <div class="modal-footer">
@@ -166,11 +187,12 @@ function customerForm(c = null) {
 }
 
 window.saveCustomer = async (id) => {
+  const g = f => document.getElementById(f).value.trim() || null
   const body = {
     name: document.getElementById('f-name').value.trim(),
-    phone: document.getElementById('f-phone').value.trim() || null,
-    channel: document.getElementById('f-channel').value || null,
-    notes: document.getElementById('f-notes').value.trim() || null,
+    phone: g('f-phone'), channel: document.getElementById('f-channel').value || null,
+    email: g('f-email'), city: g('f-city'), district: g('f-district'),
+    address: g('f-address'), notes: g('f-notes'),
   }
   if (!body.name) { toast('Ad zorunludur', 'error'); return }
   try {

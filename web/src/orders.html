@@ -20,6 +20,9 @@
     </div>
   </div>
 
+  <!-- Ay şeridi -->
+  <div class="filter-tabs" id="month-tabs" style="margin-bottom:8px;overflow-x:auto"></div>
+
   <div class="filter-tabs" id="filter-tabs">
     <button class="filter-tab active" data-status="">Tümü</button>
     <button class="filter-tab" data-status="payment_pending">Ödeme Bekliyor</button>
@@ -29,11 +32,18 @@
     <button class="filter-tab" data-status="overdue">Geciken</button>
   </div>
 
+  <div class="search-bar" style="margin-bottom:12px">
+    <span>🔍</span>
+    <input id="search" type="text" placeholder="Müşteri adı veya sipariş no ara..." />
+  </div>
+
+  <div id="month-summary" class="card" style="padding:12px 16px;margin-bottom:12px;display:none"></div>
+
   <div class="card">
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>#</th><th>Müşteri</th><th>Ürünler</th><th>Toplam</th><th>Kalan</th><th>Teslim</th><th>Durum</th><th></th></tr>
+          <tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th><th>Ürünler</th><th>Toplam</th><th>Kalan</th><th>Durum</th><th></th></tr>
         </thead>
         <tbody id="orders-body">
           <tr><td colspan="8" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
@@ -49,16 +59,63 @@ import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate 
 renderSidebar('orders')
 
 let activeStatus = ''
+let activeMonth = ''      // '' = tüm aylar
+let searchQ = ''
 let orders = []
+let months = []
+
+const MONTH_TR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara']
+const monthLabel = m => {
+  const [y, mo] = m.split('-')
+  return `${MONTH_TR[parseInt(mo,10)-1]} ${y}`
+}
+const shortMoney = v => {
+  const n = parseFloat(v) || 0
+  return n >= 1000 ? '₺' + (n/1000).toFixed(1).replace('.0','') + 'K' : money(n)
+}
+
+async function loadMonths() {
+  months = await api('/orders/months')
+  // Varsayılan: içinde bulunulan ay; o ayda kayıt yoksa en yeni dolu ay
+  if (activeMonth === null) return
+  const now = new Date()
+  const cur = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`
+  activeMonth = months.some(m => m.month === cur) ? cur : (months[0]?.month || '')
+  renderMonths()
+}
+
+function renderMonths() {
+  document.getElementById('month-tabs').innerHTML =
+    `<button class="filter-tab ${activeMonth===''?'active':''}" data-month="">Tümü</button>` +
+    months.map(m => `
+      <button class="filter-tab ${activeMonth===m.month?'active':''}" data-month="${m.month}"
+        style="white-space:nowrap">
+        ${monthLabel(m.month)} <span style="opacity:.65">· ${m.order_count} · ${shortMoney(m.revenue)}</span>
+      </button>`).join('')
+
+  const box = document.getElementById('month-summary')
+  const m = months.find(x => x.month === activeMonth)
+  if (m) {
+    box.style.display = ''
+    box.innerHTML = `<div style="display:flex;gap:24px;flex-wrap:wrap;font-size:.82rem">
+      <span class="td-muted">${monthLabel(m.month)}</span>
+      <span>Sipariş: <b>${m.order_count}</b></span>
+      <span>Ciro: <b>${money(m.revenue)}</b></span>
+      <span>Tahsilat: <b class="money-pos">${money(m.collected)}</b></span>
+      <span>Açık: <b class="${parseFloat(m.open_amount)>0?'money-neg':'money-pos'}">${money(m.open_amount)}</b></span>
+    </div>`
+  } else box.style.display = 'none'
+}
 
 async function load() {
-  const url = activeStatus === 'overdue'
-    ? '/orders'
-    : `/orders${activeStatus ? '?status='+activeStatus : ''}`
-  orders = await api(url)
+  const p = new URLSearchParams()
+  if (activeStatus && activeStatus !== 'overdue') p.set('status', activeStatus)
+  if (activeMonth) p.set('month', activeMonth)
+  if (searchQ) p.set('q', searchQ)
+  orders = await api('/orders' + (p.toString() ? '?' + p : ''))
   if (activeStatus === 'overdue') {
     const now = new Date()
-    orders = orders.filter(o => o.delivery_date && new Date(o.delivery_date) < now && !['completed','cancelled'].includes(o.status))
+    orders = orders.filter(o => o.delivery_date && new Date(o.delivery_date) < now && !['completed','cancelled','shipped'].includes(o.status))
   }
   render()
 }
@@ -73,26 +130,42 @@ function render() {
     const kalan = parseFloat(o.total_amount||0) - parseFloat(o.paid_amount||0)
     const isOverdue = o.delivery_date && new Date(o.delivery_date) < new Date() && !['completed','cancelled','shipped'].includes(o.status)
     return `<tr onclick="openDetail(${o.id})" style="${isOverdue?'border-left:3px solid var(--red)':''}">
-      <td class="td-bold">#${o.id}</td>
+      <td class="td-bold td-mono">${o.order_no || '#'+o.id}</td>
       <td>${o.customer_name}</td>
-      <td class="td-muted">${o.item_count} ürün</td>
+      <td class="td-muted">${fmtDate(o.order_date)}</td>
+      <td class="td-muted">${o.unit_count} adet · ${o.item_count} kalem</td>
       <td class="td-mono td-bold">${money(o.total_amount)}</td>
       <td class="td-mono ${kalan>0?'money-neg':'money-pos'}">${kalan>0?money(kalan):'✓ Tamam'}</td>
-      <td class="td-muted">${fmtDate(o.delivery_date)}</td>
       <td>${chip(o.status)}</td>
       <td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openPayment(${o.id},${o.total_amount},${o.paid_amount})">Ödeme</button></td>
     </tr>`
   }).join('')
 }
 
-// Tab filtreler
+// Ay şeridi
+document.getElementById('month-tabs').addEventListener('click', e => {
+  const tab = e.target.closest('.filter-tab')
+  if (!tab) return
+  activeMonth = tab.dataset.month
+  renderMonths()
+  load()
+})
+
+// Durum sekmeleri
 document.getElementById('filter-tabs').addEventListener('click', e => {
   const tab = e.target.closest('.filter-tab')
   if (!tab) return
-  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('#filter-tabs .filter-tab').forEach(t => t.classList.remove('active'))
   tab.classList.add('active')
   activeStatus = tab.dataset.status
   load()
+})
+
+// Arama (debounce)
+let searchTimer
+document.getElementById('search').addEventListener('input', e => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { searchQ = e.target.value.trim(); load() }, 250)
 })
 
 window.openDetail = async (id) => {
@@ -102,7 +175,7 @@ window.openDetail = async (id) => {
   const statuses = ['draft','payment_pending','confirmed','production_pending','in_production','quality_check','ready','shipped','completed','cancelled']
   openModal(`
     <div class="modal-header">
-      <h3>Sipariş #${o.id} — ${o.customer_name}</h3>
+      <h3>${o.order_no || 'Sipariş #' + o.id} — ${o.customer_name}</h3>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
@@ -158,10 +231,50 @@ window.openDetail = async (id) => {
       </div>
     </div>
     <div class="modal-footer">
+      <button class="btn btn-danger btn-sm" onclick="confirmDeleteOrder(${o.id})">Siparişi Sil</button>
+      <div style="flex:1"></div>
       <button class="btn btn-secondary btn-sm" onclick="openPayment(${o.id},${o.total_amount},${o.paid_amount})">+ Ödeme Ekle</button>
       <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
     </div>
   `, 'modal-lg')
+}
+
+window.confirmDeleteOrder = (id) => {
+  const o = orders.find(x => x.id === id) || {}
+  const paid = parseFloat(o.paid_amount || 0)
+  openModal(`
+    <div class="modal-header"><h3>Siparişi Sil</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:.87rem;line-height:1.6;margin:0 0 12px">
+        <b>${o.order_no || '#'+id}</b> — ${o.customer_name || ''} siparişi iptal edilecek
+        ve listelerden kaldırılacak. Kayıt geçmişte izlenebilir kalır.
+      </p>
+      ${paid > 0 ? `<div style="background:var(--red-bg);border:1px solid var(--red);border-radius:8px;padding:10px 14px;font-size:.82rem;margin-bottom:12px">
+        ⚠️ Bu siparişin <b>${money(paid)}</b> tahsilatı var. Silince bu tutar
+        kasadan ters kayıtla geri alınacak.</div>` : ''}
+      <div class="form-group">
+        <label class="form-label">Silme sebebi</label>
+        <input id="del-reason" class="form-control" placeholder="Müşteri vazgeçti, yanlış giriş..." />
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Vazgeç</button>
+      <button class="btn btn-danger" onclick="doDeleteOrder(${id})">Evet, Sil</button>
+    </div>
+  `)
+}
+
+window.doDeleteOrder = async (id) => {
+  const reason = document.getElementById('del-reason').value.trim()
+  try {
+    const r = await api(`/orders/${id}`, { method: 'DELETE', body: { reason } })
+    closeModal()
+    toast(r.reversed_amount > 0
+      ? `Sipariş silindi — ${money(r.reversed_amount)} kasadan geri alındı`
+      : 'Sipariş silindi')
+    await loadMonths(); load()
+  } catch (e) { toast(e.message, 'error') }
 }
 
 function statusLabel(s) {
@@ -244,38 +357,126 @@ window.openNewOrder = async () => {
     else renderStep3()
   }
 
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]))
+
   function renderStep1() {
     openModal(`
       <div class="modal-header"><h3>Yeni Sipariş — Müşteri Seç (1/3)</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
       <div class="modal-body">
-        <input id="cust-search" class="form-control" placeholder="Müşteri ara..." oninput="filterCust()" style="margin-bottom:10px" />
-        <div id="cust-list" style="max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:6px">
-          ${customers.map(c=>`<div class="cust-item" data-id="${c.id}" data-name="${c.name}" onclick="selectCust(${c.id},'${c.name.replace(/'/g,"\\'")}',this)"
-            style="padding:10px 14px;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--surface-2)">
-            <div class="td-bold">${c.name}</div>
-            <div class="td-muted">${c.phone||''}</div>
-          </div>`).join('')}
-        </div>
+        <input id="cust-search" class="form-control" autocomplete="off"
+          placeholder="Müşteri adı veya telefon yazın..." style="margin-bottom:10px"
+          value="${esc(selectedCustomer?.name || '')}" />
+        <div id="cust-list" style="max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:6px"></div>
+        <div id="quick-form"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
-        <button class="btn btn-primary" id="btn-next1" onclick="goStep2()" disabled>Devam</button>
+        <button class="btn btn-primary" id="btn-next1" onclick="goStep2()" ${selectedCustomer?'':'disabled'}>Devam</button>
       </div>
     `)
+    const input = document.getElementById('cust-search')
+    let timer
+    input.addEventListener('input', () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => searchCustomers(input.value.trim()), 220)
+    })
+    searchCustomers(input.value.trim())
+    input.focus()
   }
 
-  window.filterCust = () => {
-    const q = document.getElementById('cust-search').value.toLowerCase()
-    document.querySelectorAll('.cust-item').forEach(el => {
-      el.style.display = el.dataset.name.toLowerCase().includes(q) ? '' : 'none'
+  async function searchCustomers(q) {
+    const list = document.getElementById('cust-list')
+    if (!list) return
+    // 3 harften azsa önden yüklenen listede filtrele, sonrası sunucu araması
+    let rows
+    if (q.length < 3) {
+      const lq = q.toLocaleLowerCase('tr')
+      rows = q ? customers.filter(c => c.name.toLocaleLowerCase('tr').includes(lq)) : customers
+      rows = rows.slice(0, 50)
+    } else {
+      rows = await api('/customers?q=' + encodeURIComponent(q))
+    }
+
+    list.innerHTML = rows.map(c => `
+      <div class="cust-item" data-id="${c.id}" data-name="${esc(c.name)}"
+        style="padding:10px 14px;border-radius:8px;cursor:pointer;background:var(--surface-2);
+        border:1px solid ${selectedCustomer?.id===c.id ? 'var(--primary)' : 'var(--border)'}">
+        <div class="td-bold">${esc(c.name)}</div>
+        <div class="td-muted" style="font-size:.78rem">
+          ${esc(c.phone || '')}${c.city ? ' · ' + esc(c.city) : ''}
+        </div>
+      </div>`).join('')
+
+    if (!rows.length) {
+      list.innerHTML = `
+        <div style="padding:14px;text-align:center;color:var(--text-secondary);font-size:.84rem">
+          "${esc(q)}" için kayıt bulunamadı
+        </div>
+        <button class="btn btn-primary btn-sm" id="btn-quick-new">
+          ➕ "${esc(q)}" için yeni müşteri oluştur
+        </button>`
+      document.getElementById('btn-quick-new').onclick = () => renderQuickForm(q)
+    }
+
+    list.querySelectorAll('.cust-item').forEach(el => el.onclick = () => {
+      selectedCustomer = { id: parseInt(el.dataset.id, 10), name: el.dataset.name }
+      list.querySelectorAll('.cust-item').forEach(e => e.style.border = '1px solid var(--border)')
+      el.style.border = '1px solid var(--primary)'
+      document.getElementById('btn-next1').disabled = false
+      document.getElementById('quick-form').innerHTML = ''
     })
   }
-  window.selectCust = (id, name, el) => {
-    selectedCustomer = { id, name }
-    document.querySelectorAll('.cust-item').forEach(e => e.style.border='1px solid var(--border)')
-    el.style.border = '1px solid var(--primary)'
-    document.getElementById('btn-next1').disabled = false
+
+  // Akış içinde hızlı müşteri kaydı
+  function renderQuickForm(name) {
+    document.getElementById('cust-list').innerHTML = ''
+    document.getElementById('quick-form').innerHTML = `
+      <div style="background:var(--surface-2);border-radius:9px;padding:14px;margin-top:4px">
+        <div class="section-title" style="margin-bottom:10px">Yeni Müşteri</div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">Ad Soyad *</label>
+            <input id="q-name" class="form-control" value="${esc(name)}" /></div>
+          <div class="form-group"><label class="form-label">Telefon</label>
+            <input id="q-phone" class="form-control" placeholder="5xx xxx xx xx" /></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">İl</label>
+            <input id="q-city" class="form-control" /></div>
+          <div class="form-group"><label class="form-label">İlçe</label>
+            <input id="q-district" class="form-control" /></div>
+        </div>
+        <div class="form-group"><label class="form-label">Adres</label>
+          <input id="q-address" class="form-control" placeholder="Mahalle, cadde, no..." /></div>
+        <div class="form-group" style="margin-bottom:10px"><label class="form-label">Kaynak</label>
+          <select id="q-channel" class="form-control">
+            <option value="">—</option>
+            <option value="instagram">Instagram</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="web">Web Sitesi</option>
+            <option value="direct">Yüz yüze</option>
+          </select></div>
+        <button class="btn btn-primary btn-sm" id="q-save">Müşteriyi Kaydet ve Devam Et</button>
+      </div>`
+    document.getElementById('q-save').onclick = saveQuickCustomer
+    document.getElementById('q-name').focus()
   }
+
+  async function saveQuickCustomer() {
+    const g = id => document.getElementById(id).value.trim()
+    if (!g('q-name')) { toast('Ad soyad zorunlu', 'error'); return }
+    try {
+      const c = await api('/customers', { method: 'POST', body: {
+        name: g('q-name'), phone: g('q-phone') || null, city: g('q-city') || null,
+        district: g('q-district') || null, address: g('q-address') || null,
+        channel: document.getElementById('q-channel').value || null } })
+      customers.push(c)
+      selectedCustomer = { id: c.id, name: c.name }
+      toast(`${c.name} oluşturuldu`)
+      step = 2; renderStep()
+    } catch (e) { toast(e.message, 'error') }
+  }
+
   window.goStep2 = () => { step=2; renderStep() }
 
   function renderStep2() {
@@ -453,7 +654,7 @@ window.openNewOrder = async () => {
 
       toast('Sipariş oluşturuldu 🎉')
       closeModal()
-      load()
+      await loadMonths(); load()
     } catch(e) { toast(e.message,'error') }
   }
 
@@ -461,7 +662,7 @@ window.openNewOrder = async () => {
 }
 
 window.closeModal = closeModal
-load()
+;(async () => { await loadMonths(); await load() })()
 </script>
 </body>
 </html>

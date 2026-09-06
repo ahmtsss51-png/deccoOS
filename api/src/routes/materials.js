@@ -58,7 +58,7 @@ router.post('/:id/movements', async (req, res, next) => {
     if (isIn && unit_cost) {
       await client.query(`
         UPDATE materials SET
-          avg_cost = (current_stock * avg_cost + $1 * $2) / (current_stock + $1),
+          avg_cost = COALESCE((current_stock * avg_cost + $1 * $2) / NULLIF(current_stock + $1, 0), avg_cost),
           current_stock = current_stock + $1
         WHERE id=$3
       `, [quantity, unit_cost, req.params.id])

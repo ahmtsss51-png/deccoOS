@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Müşteri Detayı — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .panel { display: none }
+    .panel.active { display: block }
+    .info-grid { display: grid; gap: 14px 24px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .back-link { background: none; border: none; color: var(--text-secondary);
+      cursor: pointer; font-size: .82rem; padding: 0; margin-bottom: 10px; }
+    .back-link:hover { color: var(--text) }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <button class="back-link" onclick="location.href='/customers.html'">← Müşteri listesine dön</button>
+  <div id="view"><div class="card" style="padding:32px;text-align:center;color:var(--text-secondary)">Yükleniyor...</div></div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('customers')
+
+const id = new URLSearchParams(location.search).get('id')
+const $ = i => document.getElementById(i)
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]))
+const channelLabel = { whatsapp:'WhatsApp', instagram:'Instagram', web:'Web', direct:'Yüz yüze' }
+
+let c = null
+
+async function load() {
+  if (!id) { $('view').innerHTML = '<div class="card" style="padding:32px">Müşteri seçilmedi</div>'; return }
+  try { c = await api(`/customers/${id}`) }
+  catch (e) { $('view').innerHTML = `<div class="card" style="padding:32px">${esc(e.message)}</div>`; return }
+  render()
+}
+
+function render() {
+  const s = c.stats
+  const open = parseFloat(s.open_balance) || 0
+  // Adres bloğu sadece gerçek açık adres varsa — il/ilçe zaten yukarıda
+  const addr = c.address ? [c.address, c.district, c.city].filter(Boolean).join(', ') : ''
+
+  $('view').innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>${esc(c.name)}</h1>
+        <p style="color:var(--text-secondary);font-size:.82rem;margin:4px 0 0">
+          ${c.channel ? channelLabel[c.channel] || esc(c.channel) : 'Kanal belirtilmemiş'}
+          ${c.deleted_at ? ' · <span class="chip chip-gray">Arşivlenmiş</span>' : ''}
+        </p>
+      </div>
+      <div class="actions">
+        <button class="btn btn-secondary" id="btn-edit">Düzenle</button>
+      </div>
+    </div>
+
+    <div class="card-grid grid-4" style="margin-bottom:14px">
+      <div class="card kpi-card">
+        <div class="kpi-label">Toplam Sipariş</div>
+        <div class="kpi-value">${s.order_count}</div>
+        <div class="kpi-sub">iptal hariç</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">Toplam Ciro</div>
+        <div class="kpi-value sm">${money(s.total_ordered)}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">Tahsil Edilen</div>
+        <div class="kpi-value sm money-pos">${money(s.total_paid)}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">Açık Bakiye</div>
+        <div class="kpi-value sm ${open > 0 ? 'money-neg' : 'money-pos'}">
+          ${open > 0 ? money(open) : '✓ Kapalı'}</div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:18px;margin-bottom:14px">
+      <div class="section-title" style="margin-bottom:12px">Müşteri Bilgileri</div>
+      <div class="info-grid">
+        <div><div class="kpi-label">Telefon</div><div>${esc(c.phone) || '—'}</div></div>
+        <div><div class="kpi-label">E-posta</div><div>${esc(c.email) || '—'}</div></div>
+        <div><div class="kpi-label">İl / İlçe</div>
+          <div>${[c.city, c.district].filter(Boolean).map(esc).join(' / ') || '—'}</div></div>
+        <div><div class="kpi-label">Kayıt Tarihi</div><div>${fmtDate(c.created_at)}</div></div>
+      </div>
+      ${addr ? `<div style="margin-top:14px"><div class="kpi-label">Adres</div>
+        <div style="font-size:.88rem">${esc(addr)}</div></div>` : ''}
+      ${c.notes ? `<div style="margin-top:14px"><div class="kpi-label">Notlar</div>
+        <div style="font-size:.88rem">${esc(c.notes)}</div></div>` : ''}
+    </div>
+
+    <div class="filter-tabs" id="tabs">
+      <button class="filter-tab active" data-tab="orders">Siparişler (${c.orders.length})</button>
+      <button class="filter-tab" data-tab="payments">Tahsilatlar (${c.payments.length})</button>
+    </div>
+
+    <div class="panel active" id="panel-orders">
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Sipariş</th><th>Tarih</th><th>Ürün</th><th>Tutar</th>
+          <th>Ödenen</th><th>Kalan</th><th>Durum</th></tr></thead>
+        <tbody>${c.orders.length ? c.orders.map(o => {
+          const kalan = parseFloat(o.total_amount) - parseFloat(o.paid_amount)
+          return `<tr onclick="location.href='/orders.html'" style="cursor:pointer">
+            <td class="td-bold td-mono">${esc(o.order_no) || '#' + o.id}</td>
+            <td class="td-muted">${fmtDate(o.order_date)}</td>
+            <td class="td-muted">${o.unit_count} adet · ${o.item_count} kalem</td>
+            <td class="td-mono">${money(o.total_amount)}</td>
+            <td class="td-mono money-pos">${money(o.paid_amount)}</td>
+            <td class="td-mono ${kalan > 0 ? 'money-neg' : 'money-pos'}">
+              ${kalan > 0 ? money(kalan) : '✓'}</td>
+            <td>${chip(o.status)}</td>
+          </tr>`}).join('')
+          : `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📋</div>
+             <div>Henüz sipariş yok</div></div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+
+    <div class="panel" id="panel-payments">
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Tarih</th><th>Sipariş</th><th>Hesap</th><th>Açıklama</th>
+          <th style="text-align:right">Tutar</th></tr></thead>
+        <tbody>${c.payments.length ? c.payments.map(p => {
+          const amt = parseFloat(p.amount)
+          const isReversal = p.reference_type === 'order_reversal'
+          return `<tr>
+            <td class="td-muted">${fmtDate(p.transaction_date)}</td>
+            <td class="td-mono">${esc(p.order_no) || '#' + p.reference_id}</td>
+            <td class="td-muted">${esc(p.account_name) || '—'}</td>
+            <td>${esc(p.description) || (isReversal ? 'İade' : 'Tahsilat')}</td>
+            <td class="td-mono ${amt < 0 ? 'money-neg' : 'money-pos'}" style="text-align:right">
+              ${amt < 0 ? '−' : '+'}${money(Math.abs(amt))}</td>
+          </tr>`}).join('')
+          : `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">💰</div>
+             <div>Henüz tahsilat kaydı yok</div></div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>`
+
+  $('tabs').addEventListener('click', e => {
+    const t = e.target.closest('.filter-tab')
+    if (!t) return
+    document.querySelectorAll('#tabs .filter-tab').forEach(x => x.classList.remove('active'))
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'))
+    t.classList.add('active')
+    $('panel-' + t.dataset.tab).classList.add('active')
+  })
+  $('btn-edit').onclick = editForm
+}
+
+function editForm() {
+  openModal(`
+    <div class="modal-header"><h3>Müşteri Düzenle</h3>
+      <button class="modal-close" onclick="window.__close()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Ad Soyad *</label>
+        <input id="f-name" class="form-control" value="${esc(c.name)}" /></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Telefon</label>
+          <input id="f-phone" class="form-control" value="${esc(c.phone)}" /></div>
+        <div class="form-group"><label class="form-label">Kanal</label>
+          <select id="f-channel" class="form-control">
+            <option value="">Seçin</option>
+            ${Object.entries(channelLabel).map(([k, v]) =>
+              `<option value="${k}" ${c.channel === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">E-posta</label>
+          <input id="f-email" class="form-control" value="${esc(c.email)}" /></div>
+        <div class="form-group"><label class="form-label">İl</label>
+          <input id="f-city" class="form-control" value="${esc(c.city)}" /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">İlçe</label>
+          <input id="f-district" class="form-control" value="${esc(c.district)}" /></div>
+        <div class="form-group"><label class="form-label">Adres</label>
+          <input id="f-address" class="form-control" value="${esc(c.address)}" /></div>
+      </div>
+      <div class="form-group"><label class="form-label">Notlar</label>
+        <textarea id="f-notes" class="form-control" rows="2">${esc(c.notes)}</textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="window.__close()">İptal</button>
+      <button class="btn btn-primary" id="f-save">Kaydet</button>
+    </div>`)
+
+  $('f-save').onclick = async () => {
+    const g = f => $(f).value.trim() || null
+    const name = $('f-name').value.trim()
+    if (!name) { toast('Ad zorunludur', 'error'); return }
+    try {
+      await api(`/customers/${id}`, { method: 'PUT', body: {
+        name, phone: g('f-phone'), channel: $('f-channel').value || null,
+        email: g('f-email'), city: g('f-city'), district: g('f-district'),
+        address: g('f-address'), notes: g('f-notes') } })
+      closeModal(); toast('Müşteri güncellendi'); load()
+    } catch (e) { toast(e.message, 'error') }
+  }
+}
+
+window.__close = closeModal
+load()
+</script>
+</body>
+</html>
