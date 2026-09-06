@@ -65,6 +65,9 @@ app.use('/api/production/:id/complete', requireOpened)
 app.use('/api/suppliers/purchases', requireOpened)
 app.use('/api/finance/transactions', requireOpened)
 app.use('/api/finance/transfer', requireOpened)
+app.use('/api/finance/collections', requireOpened)
+app.use('/api/suppliers/:id/payments', requireOpened)
+app.use('/api/suppliers/:id/returns', requireOpened)
 
 // API routes
 app.use('/api/opening', openingRouter)

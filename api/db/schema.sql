@@ -406,7 +406,7 @@ INSERT INTO departments (name, color) VALUES
   ('Depo', 'gray')
 ON CONFLICT (name) DO NOTHING;
 
--- Varsayılan admin kullanıcı (şifre: decco123)
+-- Varsayılan admin kullanıcı (şifre: admin123)
 INSERT INTO users (full_name, username, password_hash, role, department)
-VALUES ('Yönetici', 'admin', '$2b$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'admin', 'Yönetim')
+VALUES ('Yönetici', 'admin', '$2a$10$YVDFRTR/IzUIblBReAGZL.ZuBPGVdSBL1RNJVx.nohTQx6d6e7tQa', 'admin', 'Yönetim')
 ON CONFLICT (username) DO NOTHING;

@@ -82,12 +82,15 @@ function render(data) {
     body.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">🏭</div><div>Tedarikçi bulunamadı</div></div></td></tr>`
     return
   }
-  body.innerHTML = data.map(s => `<tr onclick="openSupplierDetail(${s.id})" style="cursor:pointer">
+  body.innerHTML = data.map(s => `<tr onclick="location.href='/supplier-detail.html?id=${s.id}'" style="cursor:pointer">
     <td class="td-bold">${s.name}</td>
     <td class="td-muted">${s.phone || '—'}</td>
     <td class="td-mono ${parseFloat(s.total_debt) > 0 ? 'money-neg' : ''}">${parseFloat(s.total_debt) > 0 ? money(s.total_debt) : '—'}</td>
-    <td class="td-muted">${fmtDate(s.created_at)}</td>
-    <td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openSupplierForm(${s.id})">Düzenle</button></td>
+    <td class="td-muted">${fmtDate(s.last_purchase_at)}</td>
+    <td style="white-space:nowrap">
+      <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();location.href='/supplier-detail.html?id=${s.id}'">Detay</button>
+      <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openSupplierForm(${s.id})">Düzenle</button>
+    </td>
   </tr>`).join('')
 }
 

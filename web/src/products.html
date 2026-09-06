@@ -20,9 +20,24 @@
     </div>
   </div>
 
-  <div class="search-bar" style="margin-bottom:12px">
-    <span>🔍</span>
-    <input id="search" type="text" placeholder="Kod veya ürün adı ara..." oninput="filterProducts()" />
+  <div style="display:flex;gap:12px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+    <div class="search-bar" style="flex:1;min-width:200px;margin:0">
+      <span>🔍</span>
+      <input id="search" type="text" placeholder="Kod veya ürün adı ara..." oninput="filterProducts()" />
+    </div>
+    <select id="sort-by" class="form-control" style="width:160px" onchange="load()">
+      <option value="code">Kod</option>
+      <option value="name">Ad</option>
+      <option value="base_price">Fiyat</option>
+      <option value="standard_production_minutes">Üretim Süresi</option>
+    </select>
+    <select id="sort-dir" class="form-control" style="width:100px" onchange="load()">
+      <option value="asc">Artan</option>
+      <option value="desc">Azalan</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;white-space:nowrap;cursor:pointer">
+      <input type="checkbox" id="show-inactive" onchange="load()" /> Pasifleri göster
+    </label>
   </div>
 
   <div class="card">
@@ -45,10 +60,14 @@ import { api, money, toast, openModal, closeModal, renderSidebar } from '/js/sha
 renderSidebar('products')
 
 let allProducts = []
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
 
-async function load() {
-  allProducts = await api('/products')
-  render(allProducts)
+window.load = async function load() {
+  const sort = document.getElementById('sort-by').value
+  const dir = document.getElementById('sort-dir').value
+  const inactive = document.getElementById('show-inactive').checked ? '1' : ''
+  allProducts = await api(`/products?sort=${sort}&dir=${dir}${inactive?'&include_inactive=1':''}`)
+  filterProducts()
 }
 
 function render(data) {
@@ -57,14 +76,17 @@ function render(data) {
     body.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🎒</div><div>Ürün bulunamadı</div></div></td></tr>`
     return
   }
-  body.innerHTML = data.map(p => `<tr onclick="openProductForm(${p.id})" style="cursor:pointer">
-    <td class="td-bold td-mono">${p.code}</td>
-    <td>${p.name}</td>
+  body.innerHTML = data.map(p => `<tr>
+    <td class="td-bold td-mono ${p.is_active?'':'td-muted'}">${esc(p.code)}</td>
+    <td ${!p.is_active?'style="color:var(--text-secondary)"':''}>${esc(p.name)}</td>
     <td class="td-mono">${money(p.base_price)}</td>
     <td style="text-align:center">${p.allows_personalization ? '<span class="chip chip-green">Evet</span>' : '<span class="chip chip-gray">Hayır</span>'}</td>
     <td class="td-mono td-muted">${p.standard_production_minutes ? p.standard_production_minutes + ' dk' : '—'}</td>
     <td>${p.is_active ? '<span class="chip chip-green">Aktif</span>' : '<span class="chip chip-gray">Pasif</span>'}</td>
-    <td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openProductForm(${p.id})">Düzenle</button></td>
+    <td style="white-space:nowrap">
+      <button class="btn btn-secondary btn-sm" onclick="openProductForm(${p.id})">Düzenle</button>
+      <button class="btn btn-danger btn-sm" onclick="confirmDelete(${p.id})">Sil</button>
+    </td>
   </tr>`).join('')
 }
 
@@ -73,32 +95,54 @@ window.filterProducts = () => {
   render(allProducts.filter(p => p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)))
 }
 
+window.confirmDelete = (id) => {
+  const p = allProducts.find(x => x.id === id) || {}
+  openModal(`
+    <div class="modal-header"><h3>Ürünü Sil</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:.87rem;line-height:1.6;margin:0">
+        <b>${esc(p.name)}</b> (${esc(p.code)}) silinecek.<br>
+        Siparişlerde kullanılmışsa pasife alınır, hiç kullanılmamışsa tamamen silinir.
+      </p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Vazgeç</button>
+      <button class="btn btn-danger" onclick="doDelete(${id})">Evet, Sil</button>
+    </div>`)
+}
+
+window.doDelete = async (id) => {
+  try {
+    const r = await api(`/products/${id}`, { method: 'DELETE' })
+    closeModal()
+    toast(r.hard_deleted ? 'Ürün silindi' : 'Ürün pasife alındı')
+    load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
 window.openProductForm = async (id = null) => {
   let p = {}
-  if (id) {
-    const list = await api('/products')
-    p = list.find(x => x.id === id) || {}
-  }
+  if (id) p = allProducts.find(x => x.id === id) || await api(`/products/${id}`)
   openModal(`
     <div class="modal-header"><h3>${id ? 'Ürün Düzenle' : 'Yeni Ürün'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <div class="form-row">
         <div class="form-group"><label class="form-label">Ürün Kodu *</label>
-          <input id="p-code" class="form-control" value="${p.code||''}" placeholder="DPF001" /></div>
+          <input id="p-code" class="form-control" value="${esc(p.code||'')}" placeholder="DPF001" /></div>
         <div class="form-group"><label class="form-label">Satış Fiyatı (₺) *</label>
           <input id="p-price" class="form-control" type="number" value="${p.base_price||''}" /></div>
       </div>
       <div class="form-group"><label class="form-label">Ürün Adı *</label>
-        <input id="p-name" class="form-control" value="${p.name||''}" placeholder="Double Portföy Cüzdan" /></div>
+        <input id="p-name" class="form-control" value="${esc(p.name||'')}" placeholder="Double Portföy Cüzdan" /></div>
       <div class="form-group"><label class="form-label">Açıklama</label>
-        <textarea id="p-desc" class="form-control" rows="2">${p.description||''}</textarea></div>
+        <textarea id="p-desc" class="form-control" rows="2">${esc(p.description||'')}</textarea></div>
       <div class="form-row">
         <div class="form-group"><label class="form-label">İsim Baskısı İzni</label>
           <select id="p-perso" class="form-control">
             <option value="false" ${!p.allows_personalization?'selected':''}>Hayır</option>
             <option value="true" ${p.allows_personalization?'selected':''}>Evet</option>
-          </select>
-        </div>
+          </select></div>
         <div class="form-group"><label class="form-label">Standart Üretim Süresi (dk)</label>
           <input id="p-time" class="form-control" type="number" value="${p.standard_production_minutes||''}" /></div>
       </div>
@@ -112,8 +156,7 @@ window.openProductForm = async (id = null) => {
       <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
       ${id ? `<button class="btn btn-secondary btn-sm" onclick="closeModal();location.href='/settings.html#recipes'">📋 Reçete Düzenle</button>` : ''}
       <button class="btn btn-primary" onclick="saveProduct(${id||'null'})">Kaydet</button>
-    </div>
-  `)
+    </div>`)
 }
 
 window.saveProduct = async (id) => {

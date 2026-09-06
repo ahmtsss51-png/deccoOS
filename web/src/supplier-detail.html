@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Tedarikçi Detayı — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .panel { display: none }
+    .panel.active { display: block }
+    .ledger-debit  { color: var(--red) }
+    .ledger-credit { color: var(--green) }
+    .back-link { background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:.82rem;padding:0;margin-bottom:10px }
+    .back-link:hover { color:var(--text) }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <button class="back-link" onclick="location.href='/suppliers.html'">← Tedarikçi listesine dön</button>
+  <div id="view"><div class="card" style="padding:32px;text-align:center;color:var(--text-secondary)">Yükleniyor...</div></div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate } from '/js/shared.js'
+renderSidebar('suppliers')
+
+const id = new URLSearchParams(location.search).get('id')
+const $ = i => document.getElementById(i)
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
+
+let s = null, purchases = [], payments = [], returns_ = [], ledger = [], accounts = []
+
+async function load() {
+  if (!id) { $('view').innerHTML = '<div class="card" style="padding:32px">Tedarikçi seçilmedi</div>'; return }
+  try {
+    [s, accounts] = await Promise.all([api(`/suppliers/${id}`), api('/finance/accounts')])
+    ;[purchases, payments, returns_, ledger] = await Promise.all([
+      api(`/suppliers/${id}/purchases`),
+      api('/finance/transactions').then(ts => ts.filter(t => t.reference_type === 'supplier_payment')),
+      Promise.resolve([]),
+      api(`/suppliers/${id}/ledger`)
+    ])
+    render()
+  } catch (e) { $('view').innerHTML = `<div class="card" style="padding:32px">${esc(e.message)}</div>` }
+}
+
+function render() {
+  const debt = parseFloat(s.total_debt) || 0
+  $('view').innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>${esc(s.name)}</h1>
+        <p style="color:var(--text-secondary);font-size:.82rem;margin:4px 0 0">
+          ${s.deleted_at ? '<span class="chip chip-gray">Arşivlenmiş</span>' : 'Aktif tedarikçi'}
+        </p>
+      </div>
+      <div class="actions">
+        <button class="btn btn-secondary" onclick="openPurchaseForm()">+ Yeni Alım</button>
+        ${debt > 0 ? `<button class="btn btn-secondary" onclick="openPayment()">💵 Ödeme Yap</button>` : ''}
+        <button class="btn btn-secondary" onclick="openReturn()">↩ İade Gir</button>
+        <button class="btn btn-secondary" onclick="editForm()">Düzenle</button>
+      </div>
+    </div>
+
+    <div class="card-grid grid-4" style="margin-bottom:14px">
+      <div class="card kpi-card">
+        <div class="kpi-label">Toplam Alım</div>
+        <div class="kpi-value sm">${money(s.lifetime_purchases)}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">Yapılan Ödeme</div>
+        <div class="kpi-value sm money-pos">${money(s.lifetime_payments)}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">İade Edilen</div>
+        <div class="kpi-value sm">${money(s.lifetime_returns)}</div>
+      </div>
+      <div class="card kpi-card">
+        <div class="kpi-label">Cari Borç</div>
+        <div class="kpi-value sm ${debt > 0 ? 'money-neg' : 'money-pos'}">
+          ${debt > 0 ? money(debt) : '✓ Borç yok'}</div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:18px;margin-bottom:14px">
+      <div class="info-grid" style="display:grid;gap:14px 24px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+        <div><div class="kpi-label">Telefon</div><div>${esc(s.phone) || '—'}</div></div>
+        <div><div class="kpi-label">E-posta</div><div>${esc(s.email) || '—'}</div></div>
+        <div><div class="kpi-label">Vergi No</div><div>${esc(s.tax_no) || '—'}</div></div>
+        <div><div class="kpi-label">Son Alım</div><div>${fmtDate(s.last_purchase_at)}</div></div>
+      </div>
+      ${s.address ? `<div style="margin-top:12px"><div class="kpi-label">Adres</div><div style="font-size:.88rem">${esc(s.address)}</div></div>` : ''}
+      ${s.notes ? `<div style="margin-top:12px"><div class="kpi-label">Notlar</div><div style="font-size:.88rem">${esc(s.notes)}</div></div>` : ''}
+    </div>
+
+    <div class="filter-tabs" id="tabs">
+      <button class="filter-tab active" data-tab="ledger">Cari Hareketler</button>
+      <button class="filter-tab" data-tab="purchases">Alımlar (${purchases.length})</button>
+    </div>
+
+    <div class="panel active" id="panel-ledger">
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Tarih</th><th>Tür</th><th>Açıklama</th>
+          <th style="text-align:right">Borç</th><th style="text-align:right">Alacak</th>
+          <th style="text-align:right">Bakiye</th></tr></thead>
+        <tbody>${ledger.length ? ledger.map(r => {
+          const typeLabel = { purchase:'Alım', payment:'Ödeme', return:'İade' }
+          const typeChip = { purchase:'chip-blue', payment:'chip-green', return:'chip-yellow' }
+          return `<tr>
+            <td class="td-muted">${fmtDate(r.date)}</td>
+            <td><span class="chip ${typeChip[r.entry_type]||''}">${typeLabel[r.entry_type]||r.entry_type}</span></td>
+            <td>${esc(r.description)}</td>
+            <td class="td-mono ledger-debit" style="text-align:right">${parseFloat(r.debit)>0?money(r.debit):'—'}</td>
+            <td class="td-mono ledger-credit" style="text-align:right">${parseFloat(r.credit)>0?money(r.credit):'—'}</td>
+            <td class="td-mono td-bold" style="text-align:right;color:${r.running_balance>0?'var(--red)':'var(--green)'}">
+              ${money(Math.abs(r.running_balance))} ${r.running_balance>0?'B':r.running_balance<0?'A':''}</td>
+          </tr>`}).join('')
+          : '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📊</div><div>Henüz hareket yok</div></div></td></tr>'}
+        </tbody>
+      </table></div></div>
+    </div>
+
+    <div class="panel" id="panel-purchases">
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Tarih</th><th>Toplam</th><th>Ödenen</th><th>Kalan</th><th>Malzemeler</th></tr></thead>
+        <tbody>${purchases.length ? purchases.map(p => {
+          const kalan = parseFloat(p.total_amount) - parseFloat(p.paid_amount)
+          const lines = Array.isArray(p.lines) && p.lines[0]?.material_name
+            ? p.lines.map(l => `${l.material_sku||''} ${l.material_name} ×${l.quantity}`).join(', ')
+            : '—'
+          return `<tr>
+            <td class="td-muted">${fmtDate(p.purchase_date)}</td>
+            <td class="td-mono">${money(p.total_amount)}</td>
+            <td class="td-mono money-pos">${money(p.paid_amount)}</td>
+            <td class="td-mono ${kalan>0?'money-neg':''}">${kalan>0?money(kalan):'✓'}</td>
+            <td class="td-muted" style="font-size:.8rem">${esc(lines)}</td>
+          </tr>`}).join('')
+          : '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">📦</div><div>Alım kaydı yok</div></div></td></tr>'}
+        </tbody>
+      </table></div></div>
+    </div>`
+
+  $('tabs').addEventListener('click', e => {
+    const t = e.target.closest('.filter-tab')
+    if (!t) return
+    document.querySelectorAll('#tabs .filter-tab').forEach(x => x.classList.remove('active'))
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'))
+    t.classList.add('active')
+    $('panel-' + t.dataset.tab).classList.add('active')
+  })
+}
+
+window.openPayment = () => {
+  openModal(`
+    <div class="modal-header"><h3>Tedarikçi Ödemesi</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Tutar *</label>
+          <input id="pay-amount" class="form-control" type="number" step="0.01" placeholder="0.00" /></div>
+        <div class="form-group"><label class="form-label">Hesap *</label>
+          <select id="pay-account" class="form-control">
+            ${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}
+          </select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Alıma Bağla (opsiyonel)</label>
+          <select id="pay-purchase" class="form-control">
+            <option value="">Genel cari ödeme</option>
+            ${purchases.filter(p => parseFloat(p.total_amount)-parseFloat(p.paid_amount) > 0)
+              .map(p => `<option value="${p.id}">${fmtDate(p.purchase_date)} — Kalan ${money(parseFloat(p.total_amount)-parseFloat(p.paid_amount))}</option>`).join('')}
+          </select></div>
+        <div class="form-group"><label class="form-label">Tarih</label>
+          <input id="pay-date" class="form-control" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
+      </div>
+      <div class="form-group"><label class="form-label">Açıklama</label>
+        <input id="pay-desc" class="form-control" placeholder="Opsiyonel..." /></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="savePayment()">Ödemeyi Kaydet</button>
+    </div>`)
+}
+
+window.savePayment = async () => {
+  const amount = parseFloat($('pay-amount').value)
+  const account_id = $('pay-account').value
+  const purchase_id = $('pay-purchase').value || null
+  const paid_at = $('pay-date').value
+  const description = $('pay-desc').value || null
+  if (!amount || amount <= 0) { toast('Geçerli tutar girin', 'error'); return }
+  try {
+    await api(`/suppliers/${id}/payments`, { method: 'POST', body: { account_id, amount, purchase_id, paid_at, description } })
+    toast('Ödeme kaydedildi ✓'); closeModal(); load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.openReturn = async () => {
+  const materials = await api('/materials')
+  openModal(`
+    <div class="modal-header"><h3>İade Gir</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div id="ret-lines">
+        <div class="form-row" style="margin-bottom:8px">
+          <div class="form-group"><label class="form-label">Malzeme</label>
+            <select class="form-control ret-mat"><option value="">Seçin...</option>${materials.map(m=>`<option value="${m.id}">${m.sku} — ${m.name} (stok: ${m.current_stock})</option>`).join('')}</select>
+          </div>
+          <div class="form-group"><label class="form-label">Miktar</label>
+            <input class="form-control ret-qty" type="number" step="0.01" placeholder="0"/></div>
+          <div class="form-group"><label class="form-label">Birim Maliyet</label>
+            <input class="form-control ret-cost" type="number" step="0.01" placeholder="0"/></div>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="addRetLine()">+ Satır</button>
+      <hr style="margin:14px 0;border-color:var(--border)"/>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Mahsuplaşma</label>
+          <select id="ret-settlement" class="form-control" onchange="toggleRetAccount()">
+            <option value="debt">Borçtan mahsup</option>
+            <option value="refund">Nakit iade</option>
+          </select></div>
+        <div class="form-group" id="ret-acc-wrap" style="display:none"><label class="form-label">Hesap *</label>
+          <select id="ret-account" class="form-control">
+            ${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}
+          </select></div>
+      </div>
+      <div class="form-group"><label class="form-label">Notlar</label>
+        <input id="ret-notes" class="form-control" placeholder="Opsiyonel..." /></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveReturn()">İadeyi Kaydet</button>
+    </div>`, 'modal-lg')
+
+  window.addRetLine = () => {
+    const div = document.createElement('div')
+    div.className = 'form-row'; div.style.marginBottom = '8px'
+    div.innerHTML = `
+      <div class="form-group"><select class="form-control ret-mat"><option value="">Seçin...</option>${materials.map(m=>`<option value="${m.id}">${m.sku} — ${m.name}</option>`).join('')}</select></div>
+      <div class="form-group"><input class="form-control ret-qty" type="number" step="0.01" placeholder="0"/></div>
+      <div class="form-group"><input class="form-control ret-cost" type="number" step="0.01" placeholder="0"/></div>`
+    $('ret-lines').appendChild(div)
+  }
+  window.toggleRetAccount = () => {
+    $('ret-acc-wrap').style.display = $('ret-settlement').value === 'refund' ? '' : 'none'
+  }
+}
+
+window.saveReturn = async () => {
+  const mats = document.querySelectorAll('.ret-mat')
+  const qtys = document.querySelectorAll('.ret-qty')
+  const costs = document.querySelectorAll('.ret-cost')
+  const lines = []
+  mats.forEach((m, i) => {
+    if (!m.value) return
+    lines.push({ material_id: parseInt(m.value), quantity: parseFloat(qtys[i]?.value)||0, unit_cost: parseFloat(costs[i]?.value)||0 })
+  })
+  if (!lines.length) { toast('En az 1 satır girin', 'error'); return }
+  const settlement = $('ret-settlement').value
+  const account_id = settlement === 'refund' ? $('ret-account').value : null
+  const notes = $('ret-notes').value || null
+  try {
+    await api(`/suppliers/${id}/returns`, { method: 'POST', body: { lines, settlement, account_id, notes } })
+    toast('İade kaydedildi ✓'); closeModal(); load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.openPurchaseForm = async () => {
+  const materials = await api('/materials')
+  openModal(`
+    <div class="modal-header"><h3>Yeni Alım Kaydı</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div id="purchase-lines">
+        <div class="form-row" style="margin-bottom:8px">
+          <div class="form-group"><label class="form-label">Malzeme</label>
+            <select class="form-control pl-mat"><option value="">Seçin...</option>${materials.map(m=>`<option value="${m.id}">${m.sku} — ${m.name}</option>`).join('')}</select></div>
+          <div class="form-group"><label class="form-label">Miktar</label><input class="form-control pl-qty" type="number" step="0.01" placeholder="0"/></div>
+          <div class="form-group"><label class="form-label">Birim Fiyat (₺)</label><input class="form-control pl-price" type="number" step="0.01" placeholder="0"/></div>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="addPurchaseLine()">+ Satır Ekle</button>
+      <hr style="margin:14px 0;border-color:var(--border)"/>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Ödeme Hesabı</label>
+          <select id="pur-acc" class="form-control"><option value="">Ödeme Yapılmadı</option>${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}</select></div>
+        <div class="form-group"><label class="form-label">Ödenen Tutar (₺)</label>
+          <input id="pur-paid" class="form-control" type="number" step="0.01" value="0"/></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="savePurchase()">Alımı Kaydet</button>
+    </div>`, 'modal-lg')
+
+  window.addPurchaseLine = () => {
+    const div = document.createElement('div')
+    div.className = 'form-row'; div.style.marginBottom = '8px'
+    div.innerHTML = `
+      <div class="form-group"><select class="form-control pl-mat"><option value="">Seçin...</option>${materials.map(m=>`<option value="${m.id}">${m.sku} — ${m.name}</option>`).join('')}</select></div>
+      <div class="form-group"><input class="form-control pl-qty" type="number" step="0.01" placeholder="0"/></div>
+      <div class="form-group"><input class="form-control pl-price" type="number" step="0.01" placeholder="0"/></div>`
+    $('purchase-lines').appendChild(div)
+  }
+}
+
+window.savePurchase = async () => {
+  const mats = document.querySelectorAll('.pl-mat')
+  const qtys = document.querySelectorAll('.pl-qty')
+  const prices = document.querySelectorAll('.pl-price')
+  const lines = []
+  mats.forEach((m, i) => {
+    if (!m.value) return
+    lines.push({ material_id: parseInt(m.value), quantity: parseFloat(qtys[i]?.value)||0, unit_cost: parseFloat(prices[i]?.value)||0 })
+  })
+  if (!lines.length) { toast('En az 1 malzeme girin', 'error'); return }
+  const paid = parseFloat($('pur-paid').value)||0
+  const account_id = $('pur-acc').value || null
+  try {
+    await api('/suppliers/purchases', { method: 'POST', body: { supplier_id: parseInt(id), lines, paid_amount: paid, account_id } })
+    toast('Alım kaydedildi ✓'); closeModal(); load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+function editForm() {
+  openModal(`
+    <div class="modal-header"><h3>Tedarikçi Düzenle</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Tedarikçi Adı *</label>
+        <input id="e-name" class="form-control" value="${esc(s.name)}" /></div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Telefon</label>
+          <input id="e-phone" class="form-control" value="${esc(s.phone)}" /></div>
+        <div class="form-group"><label class="form-label">E-posta</label>
+          <input id="e-email" class="form-control" value="${esc(s.email)}" /></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Vergi No</label>
+          <input id="e-tax" class="form-control" value="${esc(s.tax_no)}" /></div>
+        <div class="form-group"><label class="form-label">Adres</label>
+          <input id="e-address" class="form-control" value="${esc(s.address)}" /></div>
+      </div>
+      <div class="form-group"><label class="form-label">Notlar</label>
+        <textarea id="e-notes" class="form-control" rows="2">${esc(s.notes)}</textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveEdit()">Kaydet</button>
+    </div>`)
+}
+
+window.saveEdit = async () => {
+  const g = f => $(f).value.trim() || null
+  const name = $('e-name').value.trim()
+  if (!name) { toast('Ad zorunludur', 'error'); return }
+  try {
+    await api(`/suppliers/${id}`, { method: 'PUT', body: {
+      name, phone: g('e-phone'), email: g('e-email'), tax_no: g('e-tax'),
+      address: g('e-address'), notes: g('e-notes') } })
+    toast('Tedarikçi güncellendi'); closeModal(); load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.closeModal = closeModal
+load()
+</script>
+</body>
+</html>

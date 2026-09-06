@@ -1,7 +1,104 @@
 import { Router } from 'express'
-import { query } from '../db.js'
+import { query, pool } from '../db.js'
 
 const router = Router()
+
+// Ortak çekirdek: müşteri tahsilatı — finance/collections ve orders/:id/payments tarafından kullanılır
+export async function applyCustomerPayment(client, { customer_id, account_id, amount, method, paid_at, description, allocations }) {
+  const { rows: openOrders } = await client.query(`
+    SELECT id, order_no, total_amount, paid_amount, status,
+           (total_amount - paid_amount) AS open_amount
+    FROM orders
+    WHERE customer_id=$1 AND deleted_at IS NULL AND status <> 'cancelled'
+      AND paid_amount < total_amount
+    ORDER BY order_date ASC, id ASC FOR UPDATE`, [customer_id])
+
+  let allocs = allocations
+  if (!allocs || !allocs.length) {
+    let remaining = amount
+    allocs = []
+    for (const o of openOrders) {
+      if (remaining <= 0.005) break
+      const open = parseFloat(o.open_amount)
+      const applying = Math.min(remaining, open)
+      allocs.push({ order_id: o.id, amount: applying })
+      remaining -= applying
+    }
+    if (remaining > 0.005) {
+      const totalOpen = openOrders.reduce((s, o) => s + parseFloat(o.open_amount), 0)
+      throw Object.assign(new Error(`Aşırı ödeme: toplam açık alacak ₺${totalOpen.toFixed(2)}, girilen ₺${amount.toFixed(2)}`), { status: 400 })
+    }
+  } else {
+    const total = allocs.reduce((s, a) => s + parseFloat(a.amount), 0)
+    if (total > amount + 0.005) throw Object.assign(new Error('Dağıtım tutarı toplam tutarı aşıyor'), { status: 400 })
+  }
+
+  const { rows: cpRows } = await client.query(`
+    INSERT INTO customer_payments (customer_id, account_id, amount, method, description, paid_at)
+    VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,NOW())) RETURNING id`,
+    [customer_id, account_id, amount, method || null, description || null, paid_at || null])
+  const paymentId = cpRows[0].id
+
+  for (const alloc of allocs) {
+    const order = openOrders.find(o => o.id === alloc.order_id)
+    if (!order) throw Object.assign(new Error('Geçersiz sipariş: ' + alloc.order_id), { status: 400 })
+    const applying = parseFloat(alloc.amount)
+    if (applying > parseFloat(order.open_amount) + 0.005)
+      throw Object.assign(new Error(`Sipariş ${order.order_no || '#' + order.id} için aşırı ödeme`), { status: 400 })
+
+    await client.query('INSERT INTO customer_payment_allocations (payment_id,order_id,amount) VALUES ($1,$2,$3)',
+      [paymentId, alloc.order_id, applying])
+    await client.query('UPDATE orders SET paid_amount=paid_amount+$1 WHERE id=$2', [applying, alloc.order_id])
+    const newPaid = parseFloat(order.paid_amount) + applying
+    if (newPaid >= parseFloat(order.total_amount) - 0.005 && ['draft', 'payment_pending'].includes(order.status))
+      await client.query("UPDATE orders SET status='confirmed' WHERE id=$1", [alloc.order_id])
+    await client.query(`
+      INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description,transaction_date)
+      VALUES ($1,$2,'customer_payment','order',$3,$4,COALESCE($5::timestamptz,NOW()))`,
+      [account_id, applying, alloc.order_id, description || null, paid_at || null])
+  }
+
+  await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amount, account_id])
+  return { payment_id: paymentId, allocations: allocs }
+}
+
+// Açık alacaklı müşteriler + siparişleri
+router.get('/receivables', async (_req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT c.id AS customer_id, c.name AS customer_name, c.phone,
+             COUNT(o.id)::int AS order_count,
+             COALESCE(SUM(o.total_amount - o.paid_amount),0) AS open_balance,
+             JSON_AGG(JSON_BUILD_OBJECT(
+               'id', o.id, 'order_no', o.order_no, 'order_date', o.order_date,
+               'total_amount', o.total_amount, 'paid_amount', o.paid_amount,
+               'open_amount', o.total_amount - o.paid_amount, 'status', o.status
+             ) ORDER BY o.order_date ASC, o.id ASC) AS orders
+      FROM orders o
+      JOIN customers c ON c.id = o.customer_id
+      WHERE o.deleted_at IS NULL AND o.status <> 'cancelled'
+        AND o.paid_amount < o.total_amount
+      GROUP BY c.id ORDER BY open_balance DESC`)
+    res.json(rows)
+  } catch (e) { next(e) }
+})
+
+// Müşteriden tahsilat al (FIFO veya manuel dağıtım)
+router.post('/collections', async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { customer_id, account_id, amount, method, paid_at, description, allocations } = req.body
+    if (!customer_id) throw Object.assign(new Error('Müşteri seçilmedi'), { status: 400 })
+    if (!account_id) throw Object.assign(new Error('Hesap seçilmedi'), { status: 400 })
+    const amt = parseFloat(amount)
+    if (!amt || amt <= 0) throw Object.assign(new Error('Geçerli tutar girin'), { status: 400 })
+    const result = await applyCustomerPayment(client, { customer_id, account_id, amount: amt, method, paid_at, description, allocations })
+    await client.query('COMMIT')
+    res.status(201).json(result)
+  } catch (e) { await client.query('ROLLBACK'); next(e) }
+  finally { client.release() }
+})
 
 router.get('/summary', async (_req, res, next) => {
   try {

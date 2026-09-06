@@ -5,42 +5,226 @@ const router = Router()
 
 router.get('/', async (_req, res, next) => {
   try {
-    const { rows } = await query('SELECT * FROM suppliers ORDER BY name')
+    const { rows } = await query(`
+      SELECT s.*, MAX(p.purchase_date) AS last_purchase_at
+      FROM suppliers s
+      LEFT JOIN purchases p ON p.supplier_id = s.id
+      WHERE s.deleted_at IS NULL
+      GROUP BY s.id ORDER BY s.name`)
     res.json(rows)
+  } catch (e) { next(e) }
+})
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { rows } = await query('SELECT * FROM suppliers WHERE id=$1', [req.params.id])
+    if (!rows[0]) return res.status(404).json({ error: 'Not found' })
+    const stats = await query(`
+      SELECT COALESCE(SUM(total_amount),0) AS lifetime_purchases,
+             MAX(purchase_date) AS last_purchase_at
+      FROM purchases WHERE supplier_id=$1`, [req.params.id])
+    const payments = await query(
+      'SELECT COALESCE(SUM(amount),0) AS lifetime_payments FROM supplier_payments WHERE supplier_id=$1',
+      [req.params.id])
+    const returns_ = await query(
+      'SELECT COALESCE(SUM(total_amount),0) AS lifetime_returns FROM purchase_returns WHERE supplier_id=$1',
+      [req.params.id])
+    res.json({
+      ...rows[0],
+      ...stats.rows[0],
+      lifetime_payments: payments.rows[0].lifetime_payments,
+      lifetime_returns: returns_.rows[0].lifetime_returns,
+    })
   } catch (e) { next(e) }
 })
 
 router.post('/', async (req, res, next) => {
   try {
-    const { name, phone, notes } = req.body
+    const { name, phone, notes, email, address, tax_no } = req.body
+    if (!name?.trim()) return res.status(400).json({ error: 'Ad zorunludur' })
     const { rows } = await query(
-      'INSERT INTO suppliers (name,phone,notes) VALUES ($1,$2,$3) RETURNING *',
-      [name, phone, notes]
-    )
+      'INSERT INTO suppliers (name,phone,notes,email,address,tax_no) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [name.trim(), phone || null, notes || null, email || null, address || null, tax_no || null])
     res.status(201).json(rows[0])
   } catch (e) { next(e) }
 })
 
 router.put('/:id', async (req, res, next) => {
   try {
-    const { name, phone, notes } = req.body
+    const { name, phone, notes, email, address, tax_no } = req.body
     const { rows } = await query(
-      'UPDATE suppliers SET name=$1, phone=$2, notes=$3 WHERE id=$4 RETURNING *',
-      [name, phone, notes, req.params.id]
-    )
+      `UPDATE suppliers SET name=$1,phone=$2,notes=$3,email=$4,address=$5,tax_no=$6 WHERE id=$7 RETURNING *`,
+      [name, phone || null, notes || null, email || null, address || null, tax_no || null, req.params.id])
     if (!rows[0]) return res.status(404).json({ error: 'Not found' })
     res.json(rows[0])
   } catch (e) { next(e) }
 })
 
+router.delete('/:id', async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { rows } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
+    if (!rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (rows[0].deleted_at) { await client.query('ROLLBACK'); return res.json({ ok: true, already_deleted: true }) }
+    if (parseFloat(rows[0].total_debt) > 0.005) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: `Borcu olan tedarikçi silinemez (₺${parseFloat(rows[0].total_debt).toFixed(2)}). Önce borcu kapatın.` })
+    }
+    const { rows: pCount } = await client.query('SELECT COUNT(*)::int AS cnt FROM purchases WHERE supplier_id=$1', [req.params.id])
+    if (pCount[0].cnt === 0) {
+      await client.query('DELETE FROM suppliers WHERE id=$1', [req.params.id])
+      await client.query('COMMIT')
+      return res.json({ ok: true, hard_deleted: true })
+    }
+    await client.query('UPDATE suppliers SET is_active=FALSE, deleted_at=NOW() WHERE id=$1', [req.params.id])
+    await client.query('COMMIT')
+    res.json({ ok: true, soft_deleted: true })
+  } catch (e) { await client.query('ROLLBACK'); next(e) }
+  finally { client.release() }
+})
+
 router.get('/:id/purchases', async (req, res, next) => {
   try {
     const { rows } = await query(
-      'SELECT * FROM purchases WHERE supplier_id=$1 ORDER BY purchase_date DESC, id DESC LIMIT 50',
-      [req.params.id]
-    )
+      `SELECT p.*, JSON_AGG(JSON_BUILD_OBJECT('material_id',pl.material_id,'quantity',pl.quantity,'unit_cost',pl.unit_cost,'material_name',m.name,'material_sku',m.sku) ORDER BY pl.id) AS lines
+       FROM purchases p
+       LEFT JOIN purchase_lines pl ON pl.purchase_id = p.id
+       LEFT JOIN materials m ON m.id = pl.material_id
+       WHERE p.supplier_id=$1
+       GROUP BY p.id ORDER BY p.purchase_date DESC, p.id DESC LIMIT 50`,
+      [req.params.id])
     res.json(rows)
   } catch (e) { next(e) }
+})
+
+router.get('/:id/ledger', async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT * FROM (
+        SELECT p.purchase_date::timestamptz AS date, 'purchase' AS entry_type,
+               p.total_amount AS debit, 0 AS credit,
+               'Alım' AS description, p.id AS ref_id, p.id AS purchase_id,
+               NULL::int AS payment_id, NULL::int AS return_id
+        FROM purchases p WHERE p.supplier_id=$1
+        UNION ALL
+        SELECT sp.paid_at AS date, 'payment' AS entry_type,
+               0 AS debit, sp.amount AS credit,
+               COALESCE(sp.description,'Ödeme') AS description, sp.id AS ref_id,
+               sp.purchase_id, sp.id AS payment_id, NULL::int AS return_id
+        FROM supplier_payments sp WHERE sp.supplier_id=$1
+        UNION ALL
+        SELECT pr.return_date AS date, 'return' AS entry_type,
+               0 AS debit, pr.total_amount AS credit,
+               COALESCE(pr.notes,'İade') AS description, pr.id AS ref_id,
+               pr.purchase_id, NULL::int AS payment_id, pr.id AS return_id
+        FROM purchase_returns pr WHERE pr.supplier_id=$1
+      ) t ORDER BY date ASC, ref_id ASC`, [req.params.id])
+    // Running balance (borç birikimi)
+    let balance = 0
+    const result = rows.map(r => {
+      balance += parseFloat(r.debit) - parseFloat(r.credit)
+      return { ...r, running_balance: parseFloat(balance.toFixed(2)) }
+    })
+    res.json(result)
+  } catch (e) { next(e) }
+})
+
+// Tedarikçiye ödeme
+router.post('/:id/payments', async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { account_id, amount, description, purchase_id, paid_at } = req.body
+    if (!account_id || !amount || parseFloat(amount) <= 0) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Hesap ve geçerli tutar zorunludur' })
+    }
+    const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
+    if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    const amt = parseFloat(amount)
+
+    const { rows: sp } = await client.query(`
+      INSERT INTO supplier_payments (supplier_id,account_id,purchase_id,amount,description,paid_at)
+      VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,NOW())) RETURNING *`,
+      [req.params.id, account_id, purchase_id || null, amt, description || null, paid_at || null])
+
+    await client.query(`
+      INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description,transaction_date)
+      VALUES ($1,$2,'supplier_payment','supplier_payment',$3,$4,COALESCE($5::timestamptz,NOW()))`,
+      [account_id, -amt, sp[0].id, description || null, paid_at || null])
+
+    await client.query('UPDATE accounts SET balance=balance-$1 WHERE id=$2', [amt, account_id])
+    await client.query('UPDATE suppliers SET total_debt=total_debt-$1 WHERE id=$2', [amt, req.params.id])
+    if (purchase_id)
+      await client.query('UPDATE purchases SET paid_amount=paid_amount+$1 WHERE id=$2', [amt, purchase_id])
+
+    await client.query('COMMIT')
+    res.status(201).json(sp[0])
+  } catch (e) { await client.query('ROLLBACK'); next(e) }
+  finally { client.release() }
+})
+
+// Tedarikçi iade
+router.post('/:id/returns', async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { lines, settlement, account_id, notes, purchase_id, return_date } = req.body
+    if (!lines || !lines.length) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'En az 1 malzeme satırı gerekli' })
+    }
+    if (settlement === 'refund' && !account_id) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Nakit iadede hesap seçilmeli' })
+    }
+
+    const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
+    if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+
+    let total = 0
+    for (const l of lines) total += parseFloat(l.quantity) * parseFloat(l.unit_cost)
+
+    const { rows: pr } = await client.query(`
+      INSERT INTO purchase_returns (supplier_id,purchase_id,total_amount,settlement,account_id,notes,return_date)
+      VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz,NOW())) RETURNING *`,
+      [req.params.id, purchase_id || null, total, settlement || 'debt', account_id || null, notes || null, return_date || null])
+
+    for (const l of lines) {
+      const qty = parseFloat(l.quantity)
+      // Stok yeterlilik kontrolü
+      const { rows: mat } = await client.query('SELECT current_stock FROM materials WHERE id=$1', [l.material_id])
+      if (!mat[0] || parseFloat(mat[0].current_stock) < qty - 0.001) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: `Yeterli stok yok (malzeme ${l.material_id})` })
+      }
+      await client.query(
+        'INSERT INTO purchase_return_lines (return_id,material_id,quantity,unit_cost) VALUES ($1,$2,$3,$4)',
+        [pr[0].id, l.material_id, qty, l.unit_cost])
+      // avg_cost değişmez, sadece stok düşer
+      await client.query('UPDATE materials SET current_stock=current_stock-$1 WHERE id=$2', [qty, l.material_id])
+      await client.query(`
+        INSERT INTO stock_movements (material_id,movement_type,quantity,unit_cost,reference_type,reference_id)
+        VALUES ($1,'return_out',$2,$3,'purchase_return',$4)`,
+        [l.material_id, qty, l.unit_cost, pr[0].id])
+    }
+
+    if (settlement === 'debt') {
+      await client.query('UPDATE suppliers SET total_debt=total_debt-$1 WHERE id=$2', [total, req.params.id])
+    } else {
+      // Nakit geri
+      await client.query(`
+        INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description)
+        VALUES ($1,$2,'supplier_payment','purchase_return',$3,$4)`,
+        [account_id, total, pr[0].id, notes || 'İade nakit iadesi'])
+      await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [total, account_id])
+    }
+
+    await client.query('COMMIT')
+    res.status(201).json(pr[0])
+  } catch (e) { await client.query('ROLLBACK'); next(e) }
+  finally { client.release() }
 })
 
 // Satın alma girişi
@@ -55,40 +239,32 @@ router.post('/purchases', async (req, res, next) => {
     const { rows: purchaseRows } = await client.query(
       `INSERT INTO purchases (supplier_id,total_amount,paid_amount,notes)
        VALUES ($1,$2,$3,$4) RETURNING *`,
-      [supplier_id, total, paid_amount || 0, notes]
-    )
+      [supplier_id, total, paid_amount || 0, notes])
     const purchase = purchaseRows[0]
 
     for (const line of lines) {
       await client.query(
         'INSERT INTO purchase_lines (purchase_id,material_id,quantity,unit_cost) VALUES ($1,$2,$3,$4)',
-        [purchase.id, line.material_id, line.quantity, line.unit_cost]
-      )
-      // Stok + ağırlıklı ortalama maliyet güncelle
+        [purchase.id, line.material_id, line.quantity, line.unit_cost])
       await client.query(`
         UPDATE materials SET
           avg_cost = COALESCE((current_stock * avg_cost + $1 * $2) / NULLIF(current_stock + $1, 0), avg_cost),
           current_stock = current_stock + $1
-        WHERE id=$3
-      `, [line.quantity, line.unit_cost, line.material_id])
+        WHERE id=$3`, [line.quantity, line.unit_cost, line.material_id])
       await client.query(
         `INSERT INTO stock_movements (material_id,movement_type,quantity,unit_cost,reference_type,reference_id)
          VALUES ($1,'purchase_in',$2,$3,'purchase',$4)`,
-        [line.material_id, line.quantity, line.unit_cost, purchase.id]
-      )
+        [line.material_id, line.quantity, line.unit_cost, purchase.id])
     }
 
-    // Tedarikçi borç güncelle
     const debt = total - (paid_amount || 0)
     await client.query('UPDATE suppliers SET total_debt=total_debt+$1 WHERE id=$2', [debt, supplier_id])
 
-    // Ödeme yapıldıysa kasa düş
     if (paid_amount && account_id) {
       await client.query(
         `INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id)
          VALUES ($1,$2,'supplier_payment','purchase',$3)`,
-        [account_id, -paid_amount, purchase.id]
-      )
+        [account_id, -paid_amount, purchase.id])
       await client.query('UPDATE accounts SET balance=balance-$1 WHERE id=$2', [paid_amount, account_id])
     }
 
