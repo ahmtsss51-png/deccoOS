@@ -17,7 +17,7 @@
     .accent-red    { border-top: 2px solid var(--red); }
     .accent-purple { border-top: 2px solid var(--purple); }
 
-    .progress-row { display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .progress-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 10px; align-items: center; margin-bottom: 10px; }
     .progress-label { font-size: .8rem; color: var(--text-secondary); }
     .progress-count { font-size: .85rem; font-variant-numeric: tabular-nums; }
 
@@ -32,6 +32,19 @@
       background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 4px; color: transparent !important; }
     @keyframes shimmer { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
     .skel-value { min-height: 1.6rem; }
+
+    /* CHK-D01: PRE-OPENING banner */
+    .pre-opening-banner {
+      background: var(--yellow-bg);
+      border: 1px solid var(--yellow);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: .85rem;
+      display: none;
+    }
+    .pre-opening-banner b { color: var(--text); }
+    .not-verified { color: var(--text-secondary) !important; font-size: .9rem !important; }
   </style>
 </head>
 <body>
@@ -48,6 +61,13 @@
       <div class="subtitle" id="daily-summary">Yükleniyor...</div>
     </div>
     <div class="date-badge" id="today-date"></div>
+  </div>
+
+  <!-- CHK-D01: PRE-OPENING uyarı bandı -->
+  <div class="pre-opening-banner" id="pre-opening-banner">
+    ⚠️ <b>Gerçek Başlangıç tamamlanmadı.</b> Kasa, stok ve borç değerleri doğrulanmadı.
+    Stok ve finansal KPI'lar gerçeği yansıtmıyor.
+    <a href="/opening.html" style="margin-left:8px;color:var(--primary);text-decoration:underline">Açılışı tamamla →</a>
   </div>
 
   <!-- SİPARİŞ DURUMU -->
@@ -91,7 +111,7 @@
       <div class="kpi-icon" style="background:var(--blue-bg)">📥</div>
       <div class="kpi-label">Müşteri Alacağı</div>
       <div class="kpi-value sm skeleton skel-value" id="val-receivable">&nbsp;</div>
-      <div class="kpi-sub">tahsil edilmedi</div>
+      <div class="kpi-sub" id="sub-receivable">tahsil edilmedi</div>
     </div>
     <div class="card kpi-card accent-red">
       <div class="kpi-icon" style="background:var(--red-bg)">📤</div>
@@ -109,9 +129,15 @@
 
   <!-- BU AY + STOK DURUMU -->
   <div class="card-grid grid-3">
+    <!-- CHK-D02: Satış / Tahsilat / Gider ayrı; Kâr = Hesaplanamadı (COGS eksik) -->
     <div class="card">
       <div class="section-title">Bu Ay</div>
       <div style="margin-top:8px">
+        <div class="progress-row">
+          <span class="progress-label">Satış</span>
+          <div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-sales" style="width:0%;background:var(--blue)"></div></div>
+          <span class="progress-count" id="val-sales" style="color:var(--blue)">—</span>
+        </div>
         <div class="progress-row">
           <span class="progress-label">Tahsilat</span>
           <div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-income" style="width:0%;background:var(--green)"></div></div>
@@ -122,10 +148,11 @@
           <div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-expense" style="width:0%;background:var(--red)"></div></div>
           <span class="progress-count money-neg" id="val-expense">—</span>
         </div>
+        <!-- CHK-R05: COGS verisi olmadan kâr doğru hesaplanamaz -->
         <div class="progress-row" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
-          <span class="progress-label" style="font-weight:600;color:var(--text)">Yaklaşık Kâr</span>
+          <span class="progress-label" style="font-weight:600;color:var(--text)">Net Kâr</span>
           <div></div>
-          <span class="progress-count td-bold" id="val-profit">—</span>
+          <span class="progress-count td-bold" id="val-profit" style="color:var(--text-secondary);font-size:.78rem">Hesaplanamadı</span>
         </div>
       </div>
     </div>
@@ -157,6 +184,7 @@
       <div class="table-wrap">
         <table>
           <thead>
+            <!-- CHK-O01: Ürünler kolonuna first_item_summary -->
             <tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th><th>Tutar</th><th>Kalan</th><th>Durum</th></tr>
           </thead>
           <tbody id="recent-orders-body">
@@ -196,6 +224,14 @@ function setVal(id, val) {
   el.textContent = val
 }
 
+function setNotVerified(id) {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.classList.remove('skeleton','skel-value')
+  el.textContent = '— Doğrulanmadı'
+  el.classList.add('not-verified')
+}
+
 async function loadDashboard() {
   try {
     const d = await api('/dashboard')
@@ -208,25 +244,72 @@ async function loadDashboard() {
     if (parseInt(o.overdue) > 0) document.getElementById('card-overdue').style.borderColor = 'var(--red)'
 
     const f = d.finance
-    setVal('val-cash', money(f.available_cash))
-    setVal('val-receivable', money(f.customer_receivable))
-    setVal('val-payable', money(f.supplier_payable))
+    const openingLocked = !!f.opening_locked
 
+    // CHK-D01: PRE-OPENING banner
+    const banner = document.getElementById('pre-opening-banner')
+    if (!openingLocked) {
+      banner.style.display = ''
+    } else {
+      banner.style.display = 'none'
+    }
+
+    // CHK-D01: Kasa / Banka — açılış doğrulanmadan gerçek değil
+    if (openingLocked) {
+      setVal('val-cash', money(f.available_cash))
+    } else {
+      setNotVerified('val-cash')
+    }
+
+    // Müşteri alacağı — tarihsel veriden geliyor, açılış öncesi etiketle
+    if (openingLocked) {
+      setVal('val-receivable', money(f.customer_receivable))
+    } else {
+      const el = document.getElementById('val-receivable')
+      if (el) {
+        el.classList.remove('skeleton','skel-value')
+        el.textContent = money(f.customer_receivable)
+        el.style.color = 'var(--text-secondary)'
+      }
+      const sub = document.getElementById('sub-receivable')
+      if (sub) sub.textContent = 'tarihsel · açılış doğrulaması bekliyor'
+    }
+
+    // CHK-A06: Tedarikçi borcu
+    if (openingLocked) {
+      setVal('val-payable', money(f.supplier_payable))
+    } else {
+      setNotVerified('val-payable')
+    }
+
+    // CHK-D01: Hazır ürün — stok doğrulanmadan güvenilmez
+    if (openingLocked) {
+      setVal('val-finished', d.stock.finished_product_count || '0')
+    } else {
+      setNotVerified('val-finished')
+    }
+
+    // CHK-D02: Bu Ay — Satış / Tahsilat / Gider ayrı
+    const sales = parseFloat(f.this_month_sales) || 0
     const income = parseFloat(f.this_month_income) || 0
     const expense = parseFloat(f.this_month_expense) || 0
-    const profit = income - expense
-    const max = Math.max(income, expense, 1)
+    const max = Math.max(sales, income, expense, 1)
+    document.getElementById('val-sales').textContent = money(sales)
     document.getElementById('val-income').textContent = money(income)
     document.getElementById('val-expense').textContent = money(expense)
-    const pEl = document.getElementById('val-profit')
-    pEl.textContent = money(profit)
-    pEl.className = `progress-count td-bold ${profit >= 0 ? 'money-pos' : 'money-neg'}`
+    document.getElementById('bar-sales').style.width = (sales / max * 100) + '%'
     document.getElementById('bar-income').style.width = (income / max * 100) + '%'
     document.getElementById('bar-expense').style.width = (expense / max * 100) + '%'
+    // CHK-R05: Kâr hesaplanamaz — kâr satırı HTML'de statik "Hesaplanamadı"
 
     const s = d.stock
-    setVal('val-finished', s.finished_product_count || '0')
-    document.getElementById('val-rawstock').textContent = money(s.raw_stock_value)
+    // CHK-D01: Ham madde değeri açılış öncesi doğrulanmadı
+    if (openingLocked) {
+      document.getElementById('val-rawstock').textContent = money(s.raw_stock_value)
+    } else {
+      document.getElementById('val-rawstock').textContent = '— Doğrulanmadı'
+      document.getElementById('val-rawstock').style.color = 'var(--text-secondary)'
+    }
     document.getElementById('val-reserved').textContent = (parseFloat(s.reserved_stock_total) || 0).toFixed(1) + ' desi'
     document.getElementById('val-lowstock').textContent = s.low_stock_count || '0'
 
@@ -237,9 +320,12 @@ async function loadDashboard() {
     tbody.innerHTML = d.recent_orders.length
       ? d.recent_orders.map(r => {
           const kalan = parseFloat(r.total_amount) - parseFloat(r.paid_amount)
+          // CHK-O01: first_item_summary; CHK-R03: order_no göster
+          const itemSummary = r.first_item_summary ||
+            `${r.unit_count} adet · ${r.item_count} kalem`
           return `<tr onclick="location.href='/orders.html'" style="cursor:pointer">
             <td class="td-bold td-mono">${r.order_no || '#' + r.id}</td>
-            <td>${r.customer_name}<br><span class="td-muted">${r.unit_count} adet · ${r.item_count} kalem</span></td>
+            <td>${r.customer_name}<br><span class="td-muted" style="font-size:.75rem">${itemSummary}</span></td>
             <td class="td-muted">${fmtDate(r.order_date)}</td>
             <td class="td-mono">${money(r.total_amount)}</td>
             <td class="td-mono ${kalan > 0 ? 'money-neg' : 'money-pos'}">${kalan > 0 ? money(kalan) : '✓'}</td>

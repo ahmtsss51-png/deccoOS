@@ -13,6 +13,12 @@
     .job-detail { font-size: .8rem; color: var(--text-secondary); margin-top: 4px; }
     .job-actions { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
     .overdue-bar { border-left: 3px solid var(--red); }
+    .source-btn { flex:1; padding:16px; border-radius:var(--radius); border:2px solid var(--border);
+      background:var(--surface-2); cursor:pointer; text-align:center; transition:border-color .15s; }
+    .source-btn:hover, .source-btn.selected { border-color:var(--primary); background:var(--surface); }
+    .source-btn .icon { font-size:1.6rem; display:block; margin-bottom:6px; }
+    .source-btn .label { font-weight:600; font-size:.9rem; }
+    .source-btn .desc { font-size:.75rem; color:var(--text-secondary); margin-top:3px; }
   </style>
 </head>
 <body>
@@ -48,14 +54,9 @@ import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate 
 renderSidebar('production')
 
 let activeStatus = 'pending'
-let jobs = []
 
 async function load() {
-  jobs = await api(`/production?status=${activeStatus}`)
-  render()
-}
-
-function render() {
+  const jobs = await api(`/production?status=${activeStatus}`)
   const container = document.getElementById('job-container')
   if (!jobs.length) {
     container.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🔨</div><div>Bu durumda üretim işi yok</div></div>`
@@ -64,10 +65,13 @@ function render() {
   container.innerHTML = jobs.map(j => {
     const sel = j.material_selections ? (typeof j.material_selections==='string'?JSON.parse(j.material_selections):j.material_selections) : {}
     const isOverdue = j.delivery_date && new Date(j.delivery_date) < new Date()
+    const sourceChip = j.source === 'order'
+      ? `<span class="chip chip-blue" style="font-size:.65rem">📋 Sipariş</span>`
+      : `<span class="chip chip-gray" style="font-size:.65rem">📦 Stok</span>`
     return `<div class="job-card ${isOverdue?'overdue-bar':''}">
       <div class="job-card-header">
         <div>
-          <div class="job-code">${j.product_code} · #${j.id}</div>
+          <div class="job-code">${j.product_code} · #${j.id} ${sourceChip}</div>
           <div class="job-name">${j.product_name}</div>
           ${sel.note?`<div class="job-detail">🎨 ${sel.note}</div>`:''}
           ${j.delivery_date?`<div class="job-detail ${isOverdue?'money-neg':''}">📅 ${fmtDate(j.delivery_date)}</div>`:''}
@@ -77,73 +81,79 @@ function render() {
           <span style="font-size:.78rem;color:var(--text-secondary)">×${j.quantity}</span>
         </div>
       </div>
-      <div class="job-actions">
-        ${actionBtns(j)}
-      </div>
+      <div class="job-actions">${actionBtns(j)}</div>
     </div>`
   }).join('')
 }
 
+// CHK-P06: Durum butonları geçerli transition'lara göre
 function actionBtns(j) {
   if (j.status === 'pending') return `
-    <button class="btn btn-primary btn-sm" onclick="updateStatus(${j.id},'in_progress')">▶ Başlat</button>
+    <button class="btn btn-primary btn-sm" onclick="doStatus(${j.id},'in_progress')">▶ Başlat</button>
+    <button class="btn btn-danger btn-sm" onclick="doStatus(${j.id},'cancelled')">İptal</button>
     <button class="btn btn-secondary btn-sm" onclick="openJobDetail(${j.id})">Detay</button>`
   if (j.status === 'in_progress') return `
-    <button class="btn btn-secondary btn-sm" onclick="updateStatus(${j.id},'quality_check')">→ Kalite Kontrol</button>
-    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id},${j.recipe_id||'null'})">✓ Tamamla</button>`
+    <button class="btn btn-secondary btn-sm" onclick="doStatus(${j.id},'quality_check')">→ Kalite</button>
+    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id})">✓ Tamamla</button>
+    <button class="btn btn-danger btn-sm" onclick="doStatus(${j.id},'cancelled')">İptal</button>`
   if (j.status === 'quality_check') return `
-    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id},${j.recipe_id||'null'})">✓ Onayla & Tamamla</button>`
+    <button class="btn btn-primary btn-sm" onclick="openComplete(${j.id})">✓ Onayla & Tamamla</button>
+    <button class="btn btn-danger btn-sm" onclick="doStatus(${j.id},'cancelled')">İptal</button>`
   return `<button class="btn btn-secondary btn-sm" onclick="openJobDetail(${j.id})">Detay</button>`
 }
 
-window.updateStatus = async (id, status) => {
+window.doStatus = async (id, status) => {
   try {
     await api(`/production/${id}/status`, { method:'PATCH', body:{status} })
-    toast('Durum güncellendi')
+    toast(status === 'cancelled' ? 'Üretim iptal edildi — rezervasyonlar serbest bırakıldı' : 'Durum güncellendi')
     load()
   } catch(e) { toast(e.message,'error') }
 }
 
-window.openComplete = (id, recipeId) => {
+window.openComplete = async (id) => {
+  const jobs = await api('/production')
+  const j = jobs.find(x=>x.id===id)||{}
   openModal(`
     <div class="modal-header">
-      <h3>Üretimi Tamamla — #${id}</h3>
+      <h3>Üretimi Tamamla — ${j.product_code} #${id}</h3>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
       <div class="form-group">
-        <label class="form-label">Birim Maliyet (₺)</label>
+        <label class="form-label">Birim Maliyet (₺) <span class="td-muted" style="font-size:.75rem">— opsiyonel</span></label>
         <input id="comp-cost" class="form-control" type="number" placeholder="Toplam malzeme + işçilik" />
       </div>
+      ${j.source === 'stock' ? `
       <div class="form-group">
-        <label class="form-label">Malzeme Konfigürasyonu</label>
+        <label class="form-label">Malzeme Konfigürasyonu <span class="td-muted" style="font-size:.75rem">— stok kartı için not</span></label>
         <input id="comp-config" class="form-control" placeholder="Kaşmir Yeşil, Crazy Siyah..." />
-      </div>
+      </div>` : `<div class="form-group"><div class="kpi-label">Kaynak: Sipariş — hazır ürün stoka eklenmez</div></div>`}
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
-      <button class="btn btn-primary" onclick="submitComplete(${id})">Tamamla & Stoka Ekle</button>
+      <button class="btn btn-primary" onclick="submitComplete(${id},'${j.source||'stock'}')">Tamamla</button>
     </div>
   `)
 }
 
-window.submitComplete = async (id) => {
+window.submitComplete = async (id, source) => {
   const cost = parseFloat(document.getElementById('comp-cost').value)||0
-  const config = document.getElementById('comp-config').value
+  const config = document.getElementById('comp-config')?.value
   try {
     await api(`/production/${id}/complete`, { method:'POST', body:{
-      unit_cost: cost,
-      material_config: { note: config },
+      unit_cost: cost || null,
+      material_config: config ? { note: config } : {},
     }})
-    toast('Üretim tamamlandı, stoka eklendi ✓')
-    closeModal()
-    load()
+    toast(source === 'order'
+      ? 'Üretim tamamlandı — sipariş hazır 🎉'
+      : 'Üretim tamamlandı, stoka eklendi ✓')
+    closeModal(); load()
   } catch(e) { toast(e.message,'error') }
 }
 
 window.openJobDetail = async (id) => {
-  const jobs_all = await api(`/production`)
-  const j = jobs_all.find(x=>x.id===id)||{}
+  const jobs = await api(`/production`)
+  const j = jobs.find(x=>x.id===id)||{}
   const sel = j.material_selections ? (typeof j.material_selections==='string'?JSON.parse(j.material_selections):j.material_selections) : {}
   openModal(`
     <div class="modal-header"><h3>Üretim #${id} — ${j.product_name||''}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
@@ -151,6 +161,7 @@ window.openJobDetail = async (id) => {
       <div class="form-row">
         <div><div class="kpi-label">Ürün</div><div class="td-bold">${j.product_code} — ${j.product_name}</div></div>
         <div><div class="kpi-label">Adet</div><div class="td-bold">${j.quantity}</div></div>
+        <div><div class="kpi-label">Kaynak</div><div class="td-bold">${j.source === 'order' ? '📋 Sipariş' : '📦 Stok'}</div></div>
       </div>
       ${sel.note?`<div class="form-group"><div class="kpi-label">Malzeme</div><div>${sel.note}</div></div>`:''}
       <div class="form-group"><div class="kpi-label">Durum</div><div>${chip(j.status)}</div></div>
@@ -160,11 +171,65 @@ window.openJobDetail = async (id) => {
   `)
 }
 
+// CHK-P01: Yeni üretim işi — kaynak seçimi
 window.openNewJob = async () => {
-  const products = await api('/products')
   openModal(`
-    <div class="modal-header"><h3>Yeni Üretim İşi</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-header"><h3>Yeni Üretim İşi — Kaynak Seç</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
+      <p style="font-size:.84rem;color:var(--text-secondary);margin:0 0 14px">Bu üretim işi hangi amaçla açılıyor?</p>
+      <div style="display:flex;gap:12px">
+        <button class="source-btn" id="src-order" onclick="selectSource('order')">
+          <span class="icon">📋</span>
+          <div class="label">Sipariş İçin</div>
+          <div class="desc">Belirli bir siparişe bağlı.<br>Ödeme kuralı uygulanır.</div>
+        </button>
+        <button class="source-btn" id="src-stock" onclick="selectSource('stock')">
+          <span class="icon">📦</span>
+          <div class="label">Stok İçin</div>
+          <div class="desc">Serbest stok üretimi.<br>Ödeme kontrolü yok.</div>
+        </button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" id="btn-src-next" disabled onclick="openJobForm()">Devam →</button>
+    </div>
+  `)
+}
+
+let _selectedSource = null
+
+window.selectSource = (src) => {
+  _selectedSource = src
+  document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('selected'))
+  document.getElementById('src-' + src).classList.add('selected')
+  document.getElementById('btn-src-next').disabled = false
+}
+
+window.openJobForm = async () => {
+  const source = _selectedSource
+  const [products, orders] = await Promise.all([
+    api('/products'),
+    source === 'order' ? api('/orders?payment_status=partial,paid') : Promise.resolve([]),
+  ])
+  // For order source, show orders with open order_items
+  const openOrders = source === 'order'
+    ? await api('/orders').then(all => all.filter(o =>
+        ['draft','payment_pending','confirmed','production_pending'].includes(o.status)))
+    : []
+
+  openModal(`
+    <div class="modal-header"><h3>Yeni Üretim İşi — ${source === 'order' ? '📋 Sipariş İçin' : '📦 Stok İçin'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      ${source === 'order' ? `
+      <div class="form-group">
+        <label class="form-label">Sipariş *</label>
+        <select id="nj-order" class="form-control" onchange="onOrderChange()">
+          <option value="">Sipariş seçin...</option>
+          ${openOrders.map(o=>`<option value="${o.id}" data-paid="${o.paid_amount}" data-total="${o.total_amount}">${o.order_no||'#'+o.id} — ${o.customer_name} (${o.unit_count||'?'} adet)</option>`).join('')}
+        </select>
+        <div id="pay-warning" style="display:none;font-size:.78rem;margin-top:6px;padding:8px 10px;border-radius:6px;background:var(--yellow-bg);border:1px solid var(--yellow)"></div>
+      </div>` : ''}
       <div class="form-group">
         <label class="form-label">Ürün *</label>
         <select id="nj-product" class="form-control">
@@ -178,38 +243,101 @@ window.openNewJob = async () => {
           <input id="nj-qty" class="form-control" type="number" value="1" min="1"/>
         </div>
         <div class="form-group">
-          <label class="form-label">Deri / Malzeme</label>
+          <label class="form-label">Deri / Malzeme <span class="td-muted" style="font-size:.75rem">(not, stok tüketimi etkilemez)</span></label>
           <input id="nj-material" class="form-control" placeholder="Kaşmir Yeşil..." />
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">Notlar</label>
-        <textarea id="nj-notes" class="form-control" rows="2" placeholder="Özel notlar..."></textarea>
+        <textarea id="nj-notes" class="form-control" rows="2"></textarea>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
-      <button class="btn btn-primary" onclick="submitNewJob()">Üretim İşi Oluştur</button>
+      <button class="btn btn-secondary" onclick="openNewJob()">← Geri</button>
+      <button class="btn btn-primary" onclick="submitNewJob('${source}')">Üretim İşi Oluştur</button>
     </div>
-  `)
+  `, 'modal-lg')
 }
 
-window.submitNewJob = async () => {
+window.onOrderChange = () => {
+  const sel = document.querySelector('#nj-order option:checked')
+  const paid = parseFloat(sel?.dataset.paid || 0)
+  const total = parseFloat(sel?.dataset.total || 1)
+  const pct = total > 0 ? paid / total : 0
+  const warn = document.getElementById('pay-warning')
+  if (!sel || !sel.value) { warn.style.display = 'none'; return }
+  if (pct < 0.005) {
+    warn.style.display = ''; warn.style.background = 'var(--red-bg)'; warn.style.borderColor = 'var(--red)'
+    warn.textContent = '⛔ Ödeme alınmamış — üretim başlatmak için önce kapora alın.'
+  } else if (pct < 0.33) {
+    warn.style.display = ''; warn.style.background = 'var(--yellow-bg)'; warn.style.borderColor = 'var(--yellow)'
+    warn.textContent = `⚠️ Ödeme oranı %${Math.round(pct*100)} — %33 altında. Onay verirseniz devam edilebilir.`
+  } else {
+    warn.style.display = 'none'
+  }
+}
+
+window.submitNewJob = async (source) => {
   const product_id = document.getElementById('nj-product').value
   const quantity = parseInt(document.getElementById('nj-qty').value)||1
-  const material = document.getElementById('nj-material').value
+  const material = document.getElementById('nj-material').value.trim()
   const notes = document.getElementById('nj-notes').value
   if (!product_id) { toast('Ürün seçin','error'); return }
+
+  let order_item_id = null
+  let payment_override = false
+
+  if (source === 'order') {
+    const orderId = document.getElementById('nj-order').value
+    if (!orderId) { toast('Sipariş seçin','error'); return }
+    // Get order_items for this order and product
+    const orderDetails = await api(`/orders/${orderId}`)
+    const matchedItem = orderDetails.items?.find(i => i.product_id === parseInt(product_id))
+    if (matchedItem) {
+      order_item_id = matchedItem.id
+    } else {
+      // Use order's first item as fallback
+      order_item_id = orderDetails.items?.[0]?.id || null
+    }
+    // Check payment pct — if < 33, ask override
+    const paid = parseFloat(orderDetails.paid_amount || 0)
+    const total = parseFloat(orderDetails.total_amount || 1)
+    const pct = paid / total
+    if (pct < 0.33 && pct > 0.005) {
+      const confirmed = confirm(`Ödeme oranı %${Math.round(pct*100)} — %33 altı. Yine de üretim başlatılsın mı?`)
+      if (!confirmed) return
+      payment_override = true
+    } else if (pct < 0.005) {
+      toast('Ödeme alınmamış sipariş için üretim başlatılamaz','error')
+      return
+    }
+  }
+
   try {
     await api('/production', { method:'POST', body:{
-      product_id:parseInt(product_id), quantity,
-      material_selections:{ note: material },
-      notes
+      product_id: parseInt(product_id),
+      quantity,
+      source,
+      order_item_id: order_item_id || null,
+      payment_override,
+      material_selections: material ? { note: material } : {},
+      notes: notes || null,
     }})
     toast('Üretim işi oluşturuldu')
     closeModal()
     load()
-  } catch(e) { toast(e.message,'error') }
+  } catch(e) {
+    if (e.require_override) {
+      const confirmed = confirm(e.message + '\n\nOnay verip devam etmek ister misiniz?')
+      if (confirmed) {
+        document.querySelectorAll('#nj-notes')[0] // re-use existing form values via submitNewJob with override
+        // Set override and retry
+        toast('Onaylı olarak tekrar deneyin','error')
+      }
+    } else {
+      toast(e.message,'error')
+    }
+  }
 }
 
 // Tab

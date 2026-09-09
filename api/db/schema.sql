@@ -397,6 +397,39 @@ CREATE INDEX IF NOT EXISTS purchase_returns_sup_idx
 CREATE INDEX IF NOT EXISTS cpa_order_idx
   ON customer_payment_allocations (order_id);
 
+-- CHK-F04: Gider kategori alanı
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS category VARCHAR(100);
+
+-- CHK-F06: Transfer'de ortak referans
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS transfer_ref UUID;
+
+-- CHK-T01: Alım belge numarası
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS reference_no VARCHAR(100);
+
+-- CHK-T06: Tedarikçi iskonto/fiyat düzeltmesi (stoka dokunmaz)
+CREATE TABLE IF NOT EXISTS supplier_discounts (
+  id          SERIAL PRIMARY KEY,
+  supplier_id INT NOT NULL REFERENCES suppliers(id),
+  purchase_id INT REFERENCES purchases(id),
+  amount      NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  notes       TEXT,
+  discount_date TIMESTAMPTZ DEFAULT NOW(),
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- CHK-U04: BOM snapshot
+ALTER TABLE production_jobs ADD COLUMN IF NOT EXISTS bom_snapshot JSONB;
+
+-- CHK-P01: Üretim kaynağı — 'order' (sipariş için) | 'stock' (stok için)
+ALTER TABLE production_jobs ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'stock';
+
+-- CHK-P02: Geçersiz üretim başlatmayı loglamak için override flag
+ALTER TABLE production_jobs ADD COLUMN IF NOT EXISTS payment_override BOOLEAN DEFAULT FALSE;
+
+-- CHK-I01: Import batch takibi — aynı dosyanın tekrar yüklenmesini önler
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS import_batch_id VARCHAR(100);
+CREATE INDEX IF NOT EXISTS orders_batch_idx ON orders (import_batch_id) WHERE import_batch_id IS NOT NULL;
+
 -- Varsayılan departmanlar
 INSERT INTO departments (name, color) VALUES
   ('Yönetim', 'purple'),

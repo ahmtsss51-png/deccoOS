@@ -94,7 +94,9 @@ async function loadSummary() {
   const f = await api('/finance/summary')
   document.getElementById('val-cash').textContent = money(f.available_cash)
   document.getElementById('val-recv').textContent = money(f.customer_receivable)
-  document.getElementById('val-payable').textContent = money(f.supplier_payable)
+  // CHK-A06: Açılış doğrulanmadan gerçek borç bilinmez
+  document.getElementById('val-payable').textContent = f.opening_locked ? money(f.supplier_payable) : '— Doğrulanmadı'
+  if (!f.opening_locked) document.getElementById('val-payable').style.color = 'var(--text-secondary)'
   const net = parseFloat(f.this_month_income||0) - parseFloat(f.this_month_expense||0)
   const netEl = document.getElementById('val-net')
   netEl.textContent = money(net)
@@ -145,7 +147,12 @@ async function loadTransactions() {
   </tr>`).join('')
 }
 
+// CHK-F04: Kontrollü gider kategorileri
+const EXPENSE_CATS = ['Reklam','Kargo','Ambalaj','Kira','Elektrik/İnternet','Sarf Malzeme',
+  'Bakım/Onarım','Yazılım/Hizmet','Banka/Komisyon','Diğer']
+
 window.openExpense = () => {
+  const today = new Date().toISOString().slice(0,10)
   openModal(`
     <div class="modal-header"><h3>Gider Ekle</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
@@ -157,14 +164,21 @@ window.openExpense = () => {
           </select>
         </div>
       </div>
-      <div class="form-group"><label class="form-label">Kategori</label>
-        <select id="exp-type" class="form-control">
-          <option value="expense">Genel Gider</option>
-          <option value="asset_purchase">Demirbaş / Ekipman</option>
-        </select>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Kategori *</label>
+          <select id="exp-cat" class="form-control">
+            ${EXPENSE_CATS.map(c=>`<option value="${c}">${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">İşlem Tarihi *</label>
+          <input id="exp-date" class="form-control" type="date" value="${today}" />
+        </div>
       </div>
       <div class="form-group"><label class="form-label">Açıklama</label>
-        <input id="exp-desc" class="form-control" placeholder="Kargo, kira, meta reklam..." />
+        <input id="exp-desc" class="form-control" placeholder="Kargo firması, fatura no..." />
+      </div>
+      <div class="op-note" style="font-size:.76rem;margin-top:8px">
+        ⚠️ Demirbaş/ekipman alımları bu ekrandan girilmez — Açılış modülünü kullanın.
       </div>
     </div>
     <div class="modal-footer">
@@ -177,11 +191,13 @@ window.openExpense = () => {
 window.saveExpense = async () => {
   const amount = parseFloat(document.getElementById('exp-amount').value)
   const account_id = document.getElementById('exp-account').value
-  const transaction_type = document.getElementById('exp-type').value
+  const category = document.getElementById('exp-cat').value
+  const transaction_date = document.getElementById('exp-date').value
   const description = document.getElementById('exp-desc').value
   if (!amount||amount<=0) { toast('Geçerli tutar girin','error'); return }
+  if (!transaction_date) { toast('İşlem tarihi zorunludur','error'); return }
   try {
-    await api('/finance/transactions',{method:'POST',body:{account_id,amount:-amount,transaction_type,description}})
+    await api('/finance/transactions',{method:'POST',body:{account_id,amount:-amount,transaction_type:'expense',description,category,transaction_date}})
     toast('Gider kaydedildi')
     closeModal()
     loadSummary(); loadTransactions()
@@ -230,16 +246,14 @@ window.openNewAccount = () => {
     <div class="modal-header"><h3>Yeni Hesap</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <div class="form-group"><label class="form-label">Hesap Adı *</label><input id="na-name" class="form-control" placeholder="Nakit, İş Bankası..." /></div>
-      <div class="form-row">
-        <div class="form-group"><label class="form-label">Tür</label>
-          <select id="na-type" class="form-control">
-            <option value="cash">Nakit</option><option value="bank">Banka</option>
-            <option value="card">Kart / Sağlayıcı</option><option value="founder">Kurucu</option>
-          </select>
-        </div>
-        <div class="form-group"><label class="form-label">Açılış Bakiyesi</label>
-          <input id="na-balance" class="form-control" type="number" value="0" />
-        </div>
+      <div class="form-group"><label class="form-label">Tür</label>
+        <select id="na-type" class="form-control">
+          <option value="cash">Nakit</option><option value="bank">Banka</option>
+          <option value="card">Kart / Sağlayıcı</option><option value="founder">Kurucu</option>
+        </select>
+      </div>
+      <div class="op-note" style="margin-top:12px;font-size:.78rem">
+        Açılış bakiyesi <strong>Açılış → Kasa / Banka</strong> bölümünden girilir. Go-live sonrası hesaplar sıfır bakiyeyle oluşur.
       </div>
     </div>
     <div class="modal-footer">
@@ -252,10 +266,9 @@ window.openNewAccount = () => {
 window.saveAccount = async () => {
   const name = document.getElementById('na-name').value.trim()
   const account_type = document.getElementById('na-type').value
-  const balance = parseFloat(document.getElementById('na-balance').value)||0
   if (!name) { toast('Hesap adı zorunludur','error'); return }
   try {
-    await api('/finance/accounts',{method:'POST',body:{name,account_type,balance}})
+    await api('/finance/accounts',{method:'POST',body:{name,account_type}})
     toast('Hesap oluşturuldu')
     closeModal()
     loadAccounts()
@@ -295,11 +308,7 @@ window.openCollection = async () => {
           </select></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label class="form-label">Yöntem</label>
-          <select id="col-method" class="form-control">
-            <option value="cash">Nakit</option><option value="bank">Havale/EFT</option>
-            <option value="card">Kart</option><option value="other">Diğer</option>
-          </select></div>
+        <div class="form-group"><label class="form-label">Tarih</label>
         <div class="form-group"><label class="form-label">Tarih</label>
           <input id="col-date" class="form-control" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
       </div>
@@ -358,7 +367,9 @@ window.saveCollection = async () => {
   const customer_id = parseInt(document.getElementById('col-cust').value)
   const account_id = document.getElementById('col-account').value
   const amount = parseFloat(document.getElementById('col-amount').value)
-  const method = document.getElementById('col-method').value
+  // CHK-F02: method seçilen hesabın account_type'ından türer
+  const selAcc = accounts.find(a => String(a.id) === String(account_id))
+  const method = selAcc?.account_type === 'bank' ? 'bank' : selAcc?.account_type === 'card' ? 'card' : 'cash'
   const paid_at = document.getElementById('col-date').value
   const description = document.getElementById('col-desc').value || null
   if (!customer_id) { toast('Müşteri seçin', 'error'); return }

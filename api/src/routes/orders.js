@@ -27,14 +27,22 @@ router.get('/months', async (_req, res, next) => {
 
 router.get('/', async (req, res, next) => {
   try {
-    const { status, customer_id, month, q } = req.query
+    // CHK-O05: payment_status ayrı filtre — unpaid | partial | paid
+    const { status, customer_id, month, q, payment_status } = req.query
     if (month && !MONTH_RE.test(month)) {
       return res.status(400).json({ error: 'Geçersiz ay formatı (YYYY-AA bekleniyor)' })
     }
     let sql = `
       SELECT o.*, c.name AS customer_name,
         COUNT(oi.id) AS item_count,
-        COALESCE(SUM(oi.quantity), 0) AS unit_count
+        COALESCE(SUM(oi.quantity), 0) AS unit_count,
+        (SELECT p2.code
+           || COALESCE(' · ' || (oi2.material_selections->>'note'), '')
+           || COALESCE(' · ' || oi2.personalization, '')
+         FROM order_items oi2
+         JOIN products p2 ON p2.id = oi2.product_id
+         WHERE oi2.order_id = o.id
+         ORDER BY oi2.id LIMIT 1) AS first_item_summary
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -53,6 +61,10 @@ router.get('/', async (req, res, next) => {
       params.push(`%${q}%`)
       sql += ` AND (c.name ILIKE $${params.length} OR o.order_no ILIKE $${params.length})`
     }
+    // CHK-O05: Ödeme durumu filtresi
+    if (payment_status === 'unpaid')  sql += ' AND o.paid_amount = 0'
+    if (payment_status === 'partial') sql += ' AND o.paid_amount > 0 AND o.paid_amount < o.total_amount - 0.005'
+    if (payment_status === 'paid')    sql += ' AND o.paid_amount >= o.total_amount - 0.005'
     sql += ' GROUP BY o.id, c.name ORDER BY o.order_date DESC NULLS LAST, o.id DESC'
     const { rows } = await query(sql, params)
     res.json(rows)

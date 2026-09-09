@@ -45,10 +45,25 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const { code, name, description, base_price, allows_personalization, standard_production_minutes, is_active } = req.body
+    const { rows: existing } = await query('SELECT code FROM products WHERE id=$1', [req.params.id])
+    if (!existing[0]) return res.status(404).json({ error: 'Not found' })
+
+    // CHK-U02: Geçmişte kullanılmış ürünlerde code değiştirilemez
+    if (code && code !== existing[0].code) {
+      const { rows: usage } = await query(
+        `SELECT COUNT(*)::int AS cnt FROM order_items WHERE product_id=$1
+         UNION ALL SELECT COUNT(*)::int FROM production_jobs WHERE product_id=$1`,
+        [req.params.id])
+      const totalUsage = usage.reduce((s, r) => s + r.cnt, 0)
+      if (totalUsage > 0) {
+        return res.status(409).json({ error: 'Sipariş/üretim geçmişi bulunan ürünün kodu değiştirilemez' })
+      }
+    }
+
     const { rows } = await query(
-      `UPDATE products SET code=$1,name=$2,description=$3,base_price=$4,allows_personalization=$5,
+      `UPDATE products SET code=COALESCE($1,code),name=$2,description=$3,base_price=$4,allows_personalization=$5,
        standard_production_minutes=$6,is_active=COALESCE($7,is_active) WHERE id=$8 RETURNING *`,
-      [code, name, description, base_price, allows_personalization, standard_production_minutes, is_active, req.params.id])
+      [code || null, name, description, base_price, allows_personalization, standard_production_minutes, is_active, req.params.id])
     if (!rows[0]) return res.status(404).json({ error: 'Not found' })
     res.json(rows[0])
   } catch (e) { next(e) }

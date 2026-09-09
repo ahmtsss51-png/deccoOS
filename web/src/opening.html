@@ -213,11 +213,13 @@ async function secMaterials() {
 
   document.querySelectorAll('tr[data-id]').forEach(tr => {
     const save = async () => {
-      const body = {
-        counted_qty: numOrNull(tr.querySelector('.f-qty').value),
-        unit_cost:   numOrNull(tr.querySelector('.f-cost').value),
-        location:    tr.querySelector('.f-loc').value,
+      const qty = numOrNull(tr.querySelector('.f-qty').value)
+      const cost = numOrNull(tr.querySelector('.f-cost').value)
+      // CHK-A07: miktar > 0 ise birim maliyet zorunlu
+      if (qty !== null && qty > 0 && cost === null) {
+        toast('Miktar > 0 olduğunda birim maliyet zorunludur', 'error'); return
       }
+      const body = { counted_qty: qty, unit_cost: cost, location: tr.querySelector('.f-loc').value }
       await api(`/opening/materials/${tr.dataset.id}`, { method: 'PUT', body })
       secMaterials()
     }

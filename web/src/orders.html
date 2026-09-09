@@ -23,13 +23,26 @@
   <!-- Ay şeridi -->
   <div class="filter-tabs" id="month-tabs" style="margin-bottom:8px;overflow-x:auto"></div>
 
-  <div class="filter-tabs" id="filter-tabs">
+  <!-- CHK-O05: Operasyonel durum filtresi -->
+  <div class="filter-tabs" id="filter-tabs" style="margin-bottom:4px">
     <button class="filter-tab active" data-status="">Tümü</button>
-    <button class="filter-tab" data-status="payment_pending">Ödeme Bekliyor</button>
     <button class="filter-tab" data-status="production_pending">Üretim Bekliyor</button>
     <button class="filter-tab" data-status="in_production">Üretimde</button>
+    <button class="filter-tab" data-status="quality_check">Kalite Kontrol</button>
     <button class="filter-tab" data-status="ready">Hazır</button>
-    <button class="filter-tab" data-status="overdue">Geciken</button>
+    <button class="filter-tab" data-status="shipped">Kargolandı</button>
+    <button class="filter-tab" data-status="completed">Tamamlandı</button>
+    <button class="filter-tab" data-status="cancelled">İptal</button>
+    <button class="filter-tab" data-status="overdue">⚠️ Geciken</button>
+  </div>
+
+  <!-- CHK-O05: Ödeme durumu filtresi -->
+  <div class="filter-tabs" id="pay-filter-tabs" style="margin-bottom:8px">
+    <span style="font-size:.75rem;color:var(--text-secondary);align-self:center;margin-right:4px">Ödeme:</span>
+    <button class="filter-tab active" data-payment="">Tümü</button>
+    <button class="filter-tab" data-payment="unpaid">Ödenmedi</button>
+    <button class="filter-tab" data-payment="partial">Kısmi</button>
+    <button class="filter-tab" data-payment="paid">Ödendi</button>
   </div>
 
   <div class="search-bar" style="margin-bottom:12px">
@@ -43,7 +56,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th><th>Ürünler</th><th>Toplam</th><th>Kalan</th><th>Durum</th><th></th></tr>
+          <tr><th>Sipariş</th><th>Müşteri / Ürün</th><th>Tarih</th><th>Toplam</th><th>Kalan</th><th>Durum / Ödeme</th><th></th></tr>
         </thead>
         <tbody id="orders-body">
           <tr><td colspan="8" class="td-muted" style="text-align:center;padding:32px">Yükleniyor...</td></tr>
@@ -59,6 +72,7 @@ import { api, money, chip, toast, openModal, closeModal, renderSidebar, fmtDate 
 renderSidebar('orders')
 
 let activeStatus = ''
+let activePayment = ''    // CHK-O05: ödeme filtresi
 let activeMonth = ''      // '' = tüm aylar
 let searchQ = ''
 let orders = []
@@ -112,6 +126,7 @@ async function load() {
   if (activeStatus && activeStatus !== 'overdue') p.set('status', activeStatus)
   if (activeMonth) p.set('month', activeMonth)
   if (searchQ) p.set('q', searchQ)
+  if (activePayment) p.set('payment_status', activePayment)  // CHK-O05
   orders = await api('/orders' + (p.toString() ? '?' + p : ''))
   if (activeStatus === 'overdue') {
     const now = new Date()
@@ -129,15 +144,33 @@ function render() {
   body.innerHTML = orders.map(o => {
     const kalan = parseFloat(o.total_amount||0) - parseFloat(o.paid_amount||0)
     const isOverdue = o.delivery_date && new Date(o.delivery_date) < new Date() && !['completed','cancelled','shipped'].includes(o.status)
+
+    // CHK-O01/O06: İlk ürün özeti + +N ürün daha
+    const extra = parseInt(o.item_count) > 1 ? ` <span class="td-muted">+${parseInt(o.item_count)-1} ürün</span>` : ''
+    const itemSummary = (o.first_item_summary || `${o.unit_count} adet`) + extra
+
+    // CHK-O02: Ödeme statüsü ve operasyonel statüs ayrı badge
+    const payStatus = kalan <= 0.005
+      ? `<span class="chip chip-green" style="font-size:.7rem">Ödendi</span>`
+      : parseFloat(o.paid_amount||0) > 0
+        ? `<span class="chip chip-yellow" style="font-size:.7rem">Kısmi</span>`
+        : `<span class="chip chip-red" style="font-size:.7rem">Ödenmedi</span>`
+
+    // CHK-O03: Ödeme butonu yalnız outstanding > 0 olduğunda
+    const payBtn = kalan > 0.005
+      ? `<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openPayment(${o.id},${o.total_amount},${o.paid_amount})">Ödeme Al</button>`
+      : parseFloat(o.paid_amount||0) > 0
+        ? `<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openDetail(${o.id})">Geçmiş</button>`
+        : ''
+
     return `<tr onclick="openDetail(${o.id})" style="${isOverdue?'border-left:3px solid var(--red)':''}">
       <td class="td-bold td-mono">${o.order_no || '#'+o.id}</td>
-      <td>${o.customer_name}</td>
+      <td>${o.customer_name}<br><span class="td-muted" style="font-size:.75rem">${itemSummary}</span></td>
       <td class="td-muted">${fmtDate(o.order_date)}</td>
-      <td class="td-muted">${o.unit_count} adet · ${o.item_count} kalem</td>
       <td class="td-mono td-bold">${money(o.total_amount)}</td>
       <td class="td-mono ${kalan>0?'money-neg':'money-pos'}">${kalan>0?money(kalan):'✓ Tamam'}</td>
-      <td>${chip(o.status)}</td>
-      <td><button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openPayment(${o.id},${o.total_amount},${o.paid_amount})">Ödeme</button></td>
+      <td>${chip(o.status)}<br>${payStatus}</td>
+      <td>${payBtn}</td>
     </tr>`
   }).join('')
 }
@@ -158,6 +191,16 @@ document.getElementById('filter-tabs').addEventListener('click', e => {
   document.querySelectorAll('#filter-tabs .filter-tab').forEach(t => t.classList.remove('active'))
   tab.classList.add('active')
   activeStatus = tab.dataset.status
+  load()
+})
+
+// CHK-O05: Ödeme filtresi
+document.getElementById('pay-filter-tabs').addEventListener('click', e => {
+  const tab = e.target.closest('.filter-tab')
+  if (!tab) return
+  document.querySelectorAll('#pay-filter-tabs .filter-tab').forEach(t => t.classList.remove('active'))
+  tab.classList.add('active')
+  activePayment = tab.dataset.payment
   load()
 })
 

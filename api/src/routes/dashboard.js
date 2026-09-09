@@ -24,15 +24,21 @@ router.get('/', async (_req, res, next) => {
         WHERE deleted_at IS NULL
       `),
 
-      // Finans özeti
+      // CHK-D01/D02: opening_locked dahil; this_month_sales ayrı (order_date bazlı)
       query(`
         SELECT
           (SELECT COALESCE(SUM(balance),0) FROM accounts WHERE is_active=TRUE AND account_type != 'founder') AS available_cash,
-          -- Teslim edilmiş sipariş de ödenmemiş olabilir; sadece iptaller hariç
           (SELECT COALESCE(SUM(total_amount - paid_amount),0) FROM orders WHERE deleted_at IS NULL AND status <> 'cancelled' AND paid_amount < total_amount) AS customer_receivable,
           (SELECT COALESCE(SUM(total_debt),0) FROM suppliers) AS supplier_payable,
-          (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE amount > 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_income,
-          (SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE amount < 0 AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_expense
+          -- CHK-D02: Satış = sipariş toplam (order_date), Tahsilat = kasa girişi (transaction_date)
+          (SELECT COALESCE(SUM(total_amount),0) FROM orders WHERE deleted_at IS NULL AND status != 'cancelled'
+            AND DATE_TRUNC('month', order_date) = DATE_TRUNC('month', NOW())) AS this_month_sales,
+          (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE transaction_type='customer_payment' AND amount > 0
+            AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_income,
+          (SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE amount < 0
+            AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_expense,
+          -- CHK-D01: Açılış kilitli mi?
+          (SELECT locked_at IS NOT NULL FROM opening_sessions ORDER BY id DESC LIMIT 1) AS opening_locked
       `),
 
       // Stok özeti
@@ -60,17 +66,24 @@ router.get('/', async (_req, res, next) => {
         LIMIT 20
       `),
 
-      // Son siparişler — gerçek sipariş tarihine göre (created_at kayıt anıdır,
-      // toplu aktarımda hepsi aynı olduğu için sıralamaya uygun değil)
+      // CHK-O01: Son siparişler — order_date bazlı; first_item_summary dahil; deleted_at IS NULL
       query(`
         SELECT o.id, o.order_no, o.status, o.total_amount, o.paid_amount,
           o.order_date, o.delivery_date,
           c.name AS customer_name,
           COUNT(oi.id) AS item_count,
-          COALESCE(SUM(oi.quantity),0) AS unit_count
+          COALESCE(SUM(oi.quantity),0) AS unit_count,
+          (SELECT p2.code
+             || COALESCE(' · ' || (oi2.material_selections->>'note'), '')
+             || COALESCE(' · ' || oi2.personalization, '')
+           FROM order_items oi2
+           JOIN products p2 ON p2.id = oi2.product_id
+           WHERE oi2.order_id = o.id
+           ORDER BY oi2.id LIMIT 1) AS first_item_summary
         FROM orders o
         JOIN customers c ON c.id = o.customer_id
         LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.deleted_at IS NULL
         GROUP BY o.id, c.name
         ORDER BY o.order_date DESC NULLS LAST, o.id DESC
         LIMIT 8

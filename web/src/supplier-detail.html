@@ -34,12 +34,13 @@ const id = new URLSearchParams(location.search).get('id')
 const $ = i => document.getElementById(i)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
 
-let s = null, purchases = [], payments = [], returns_ = [], ledger = [], accounts = []
+let s = null, purchases = [], payments = [], returns_ = [], ledger = [], accounts = [], openingLocked = true
 
 async function load() {
   if (!id) { $('view').innerHTML = '<div class="card" style="padding:32px">Tedarikçi seçilmedi</div>'; return }
   try {
-    [s, accounts] = await Promise.all([api(`/suppliers/${id}`), api('/finance/accounts')])
+    const [sup, accts, summary] = await Promise.all([api(`/suppliers/${id}`), api('/finance/accounts'), api('/finance/summary')])
+    s = sup; accounts = accts; openingLocked = summary.opening_locked ?? true
     ;[purchases, payments, returns_, ledger] = await Promise.all([
       api(`/suppliers/${id}/purchases`),
       api('/finance/transactions').then(ts => ts.filter(t => t.reference_type === 'supplier_payment')),
@@ -51,7 +52,8 @@ async function load() {
 }
 
 function render() {
-  const debt = parseFloat(s.total_debt) || 0
+  const debtRaw = s.total_debt
+  const debt = parseFloat(debtRaw) || 0
   $('view').innerHTML = `
     <div class="page-header">
       <div>
@@ -64,6 +66,7 @@ function render() {
         <button class="btn btn-secondary" onclick="openPurchaseForm()">+ Yeni Alım</button>
         ${debt > 0 ? `<button class="btn btn-secondary" onclick="openPayment()">💵 Ödeme Yap</button>` : ''}
         <button class="btn btn-secondary" onclick="openReturn()">↩ İade Gir</button>
+        <button class="btn btn-secondary" onclick="openDiscount()" title="Fiyat düzeltmesi — stoka dokunmaz">⬇ İskonto</button>
         <button class="btn btn-secondary" onclick="editForm()">Düzenle</button>
       </div>
     </div>
@@ -83,8 +86,8 @@ function render() {
       </div>
       <div class="card kpi-card">
         <div class="kpi-label">Cari Borç</div>
-        <div class="kpi-value sm ${debt > 0 ? 'money-neg' : 'money-pos'}">
-          ${debt > 0 ? money(debt) : '✓ Borç yok'}</div>
+        <div class="kpi-value sm" style="${!openingLocked ? 'color:var(--text-secondary)' : debt > 0 ? 'color:var(--red)' : 'color:var(--green)'}">
+          ${!openingLocked ? '— Doğrulanmadı' : debt > 0 ? money(debt) : '✓ Borç yok'}</div>
       </div>
     </div>
 
@@ -288,6 +291,12 @@ window.openPurchaseForm = async () => {
       <button class="btn btn-secondary btn-sm" onclick="addPurchaseLine()">+ Satır Ekle</button>
       <hr style="margin:14px 0;border-color:var(--border)"/>
       <div class="form-row">
+        <div class="form-group"><label class="form-label">Alım Tarihi *</label>
+          <input id="pur-date" class="form-control" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
+        <div class="form-group"><label class="form-label">Belge / Fatura No</label>
+          <input id="pur-ref" class="form-control" placeholder="FAT-001..." /></div>
+      </div>
+      <div class="form-row">
         <div class="form-group"><label class="form-label">Ödeme Hesabı</label>
           <select id="pur-acc" class="form-control"><option value="">Ödeme Yapılmadı</option>${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}</select></div>
         <div class="form-group"><label class="form-label">Ödenen Tutar (₺)</label>
@@ -322,9 +331,43 @@ window.savePurchase = async () => {
   if (!lines.length) { toast('En az 1 malzeme girin', 'error'); return }
   const paid = parseFloat($('pur-paid').value)||0
   const account_id = $('pur-acc').value || null
+  const purchase_date = $('pur-date').value || null
+  const reference_no = $('pur-ref').value || null
   try {
-    await api('/suppliers/purchases', { method: 'POST', body: { supplier_id: parseInt(id), lines, paid_amount: paid, account_id } })
+    await api('/suppliers/purchases', { method: 'POST', body: { supplier_id: parseInt(id), lines, paid_amount: paid, account_id, purchase_date, reference_no } })
     toast('Alım kaydedildi ✓'); closeModal(); load()
+  } catch (e) { toast(e.message, 'error') }
+}
+
+// CHK-T06: Tedarikçi iskontosu — stok değişmez, yalnız borç azalır
+window.openDiscount = () => {
+  openModal(`
+    <div class="modal-header"><h3>Tedarikçi İskontosu</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="op-note" style="font-size:.78rem">Stok miktarı değişmez. Yalnız tedarikçi cari borcu azalır. Fiziksel iade için ↩ İade Gir kullanın.</div>
+      <div class="form-row" style="margin-top:12px">
+        <div class="form-group"><label class="form-label">İskonto Tutarı *</label>
+          <input id="disc-amount" class="form-control" type="number" step="0.01" placeholder="0" /></div>
+        <div class="form-group"><label class="form-label">Tarih</label>
+          <input id="disc-date" class="form-control" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
+      </div>
+      <div class="form-group"><label class="form-label">Açıklama</label>
+        <input id="disc-notes" class="form-control" placeholder="Hasarlı mal, fiyat farkı..." /></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
+      <button class="btn btn-primary" onclick="saveDiscount()">Kaydet</button>
+    </div>`)
+}
+
+window.saveDiscount = async () => {
+  const amount = parseFloat($('disc-amount').value)
+  const notes = $('disc-notes').value || null
+  const discount_date = $('disc-date').value || null
+  if (!amount || amount <= 0) { toast('Geçerli iskonto tutarı girin', 'error'); return }
+  try {
+    await api(`/suppliers/${id}/discounts`, { method: 'POST', body: { amount, notes, discount_date } })
+    toast('İskonto kaydedildi ✓'); closeModal(); load()
   } catch (e) { toast(e.message, 'error') }
 }
 

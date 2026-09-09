@@ -66,10 +66,53 @@ router.get('/:id', async (req, res, next) => {
   } catch (e) { next(e) }
 })
 
+// FIX-F3: Canonical TR telefon — 0532.../+90532.../0090532... → 5321234567
+// Önce tüm non-digit'ler temizlenir; ardından ülke kodu (90) ve baştaki 0 şeritlenir.
+// Bu mantık DB sorgusunda da yansıtılır: regexp_replace + LTRIM dönüşümü ile.
+function normalizePhone(raw) {
+  if (!raw) return null
+  let digits = String(raw).replace(/\D/g, '')
+  if (digits.startsWith('0090')) digits = digits.slice(4)
+  else if (digits.startsWith('90') && digits.length === 12) digits = digits.slice(2)
+  else if (digits.startsWith('0') && digits.length === 11) digits = digits.slice(1)
+  if (digits.length < 7) return null
+  return digits
+}
+
+// DB-side normalization: non-digit sil, ardından öne gelen 90 veya 0 şerit
+// Sonuç JS normalizePhone() ile canonical eşdeğer olur.
+const PHONE_CANON_SQL = `
+  regexp_replace(
+    regexp_replace(
+      regexp_replace(phone, '[^0-9]', '', 'g'),
+      '^0090', ''
+    ),
+    '^(90(?=\\d{10}$)|0(?=\\d{10}$))', ''
+  )`
+
 router.post('/', async (req, res, next) => {
   try {
     const { name, phone, channel, notes, city, district, address, email } = req.body
     if (!name?.trim()) return res.status(400).json({ error: 'Ad soyad zorunlu' })
+
+    // FIX-F3: Aynı canonical telefonu olan müşteri kontrolü
+    const normalized = normalizePhone(phone)
+    if (normalized) {
+      const { rows: existing } = await query(`
+        SELECT id, name FROM customers
+        WHERE deleted_at IS NULL
+          AND ${PHONE_CANON_SQL} = $1
+        LIMIT 1`, [normalized])
+      if (existing[0]) {
+        return res.status(409).json({
+          error: `Bu telefon numarası zaten kayıtlı: ${existing[0].name}`,
+          existing_id: existing[0].id,
+          existing_name: existing[0].name,
+          duplicate: true,
+        })
+      }
+    }
+
     const { rows } = await query(
       `INSERT INTO customers (name,phone,channel,notes,city,district,address,email)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,

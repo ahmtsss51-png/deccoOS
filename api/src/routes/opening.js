@@ -157,7 +157,7 @@ router.get('/materials', async (_req, res, next) => {
     const { rows } = await query(`
       SELECT l.id, l.material_id, m.sku, m.name, m.unit, m.family, m.color,
              l.counted_qty, l.unit_cost, l.location, l.notes, l.counted_at,
-             COALESCE(l.counted_qty,0) * COALESCE(l.unit_cost,0) AS total_value
+             l.counted_qty * l.unit_cost AS total_value
       FROM opening_lines l JOIN materials m ON m.id = l.material_id
       WHERE l.session_id=$1 AND l.section='material' ORDER BY m.sku`, [s.id])
     res.json(rows)
@@ -171,6 +171,9 @@ router.put('/materials/:lineId', async (req, res, next) => {
     if (!s) return res.status(409).json({ error: 'Açılış kilitlenmiş' })
     const { counted_qty, unit_cost, location, notes } = req.body
     const qty = counted_qty === '' || counted_qty === undefined ? null : counted_qty
+    if (qty !== null && parseFloat(qty) > 0 && (unit_cost === null || unit_cost === undefined || unit_cost === '')) {
+      return res.status(400).json({ error: 'Miktar > 0 olduğunda birim maliyet zorunludur' })
+    }
     const { rows } = await query(`
       UPDATE opening_lines SET
         counted_qty=$3, unit_cost=$4, location=COALESCE($5,location), notes=$6,
@@ -393,7 +396,10 @@ router.post('/lock', async (req, res, next) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const session = await getOpenSession(client)
+    // FOR UPDATE: eş zamanlı çift kilitleme engellenir
+    const { rows: sessRows } = await client.query(
+      'SELECT * FROM opening_sessions WHERE locked_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE NOWAIT')
+    const session = sessRows[0] || null
     if (!session) {
       await client.query('ROLLBACK')
       return res.status(409).json({ error: 'Açılış zaten kilitlenmiş' })

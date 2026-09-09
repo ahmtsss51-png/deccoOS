@@ -64,16 +64,26 @@ import { api, money, toast, openModal, closeModal, renderSidebar, fmtDate } from
 renderSidebar('suppliers')
 
 let allSuppliers = []
+let openingLocked = true
 
 async function load() {
-  allSuppliers = await api('/suppliers')
+  const resp = await api('/suppliers')
+  // CHK-A06: API { items, opening_locked } döner
+  allSuppliers = resp.items ?? resp  // eski format uyumu
+  openingLocked = resp.opening_locked ?? true
   render(allSuppliers)
 
   // KPIs
   document.getElementById('kpi-total').textContent = allSuppliers.length
-  const totalDebt = allSuppliers.reduce((s, x) => s + parseFloat(x.total_debt || 0), 0)
-  document.getElementById('kpi-debt').textContent = money(totalDebt)
-  document.getElementById('kpi-owed').textContent = allSuppliers.filter(s => parseFloat(s.total_debt) > 0).length
+  if (!openingLocked) {
+    document.getElementById('kpi-debt').textContent = '— Doğrulanmadı'
+    document.getElementById('kpi-debt').style.color = 'var(--text-secondary)'
+    document.getElementById('kpi-owed').textContent = '—'
+  } else {
+    const totalDebt = allSuppliers.reduce((s, x) => s + parseFloat(x.total_debt || 0), 0)
+    document.getElementById('kpi-debt').textContent = money(totalDebt)
+    document.getElementById('kpi-owed').textContent = allSuppliers.filter(s => parseFloat(s.total_debt) > 0).length
+  }
 }
 
 function render(data) {
@@ -85,7 +95,7 @@ function render(data) {
   body.innerHTML = data.map(s => `<tr onclick="location.href='/supplier-detail.html?id=${s.id}'" style="cursor:pointer">
     <td class="td-bold">${s.name}</td>
     <td class="td-muted">${s.phone || '—'}</td>
-    <td class="td-mono ${parseFloat(s.total_debt) > 0 ? 'money-neg' : ''}">${parseFloat(s.total_debt) > 0 ? money(s.total_debt) : '—'}</td>
+    <td class="td-mono ${!openingLocked ? '' : parseFloat(s.total_debt) > 0 ? 'money-neg' : ''}">${!openingLocked ? '<span style="color:var(--text-secondary)">Doğrulanmadı</span>' : parseFloat(s.total_debt) > 0 ? money(s.total_debt) : '—'}</td>
     <td class="td-muted">${fmtDate(s.last_purchase_at)}</td>
     <td style="white-space:nowrap">
       <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();location.href='/supplier-detail.html?id=${s.id}'">Detay</button>

@@ -61,13 +61,14 @@ app.use('/api', requireAuth)
 // Tanım/kayıt uçları (ürün, malzeme, müşteri, sipariş oluşturma) serbest kalır.
 app.use('/api/materials/:id/movements', requireOpened)
 app.use('/api/orders/:id/payments', requireOpened)
-app.use('/api/production/:id/complete', requireOpened)
+app.use('/api/production', requireOpened)  // job oluşturma + tüm üretim mutasyonları
 app.use('/api/suppliers/purchases', requireOpened)
 app.use('/api/finance/transactions', requireOpened)
 app.use('/api/finance/transfer', requireOpened)
 app.use('/api/finance/collections', requireOpened)
 app.use('/api/suppliers/:id/payments', requireOpened)
 app.use('/api/suppliers/:id/returns', requireOpened)
+app.use('/api/suppliers/:id/discounts', requireOpened)
 
 // API routes
 app.use('/api/opening', openingRouter)
