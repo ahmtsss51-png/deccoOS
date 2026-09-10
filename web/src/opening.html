@@ -77,9 +77,30 @@ const $ = id => document.getElementById(id)
 const el = h => { const d = document.createElement('div'); d.innerHTML = h; return d }
 const numOrNull = v => v === '' || v === null || v === undefined ? null : parseFloat(v)
 
+function isValidGoLiveDate(val) {
+  if (!val || typeof val !== 'string') return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val.trim())
+  if (!m) return false
+  const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10)
+  if (y < 2000 || y > 2100) return false
+  if (mo < 1 || mo > 12) return false
+  if (d < 1 || d > 31) return false
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d
+}
+
+function fmtCalDate(val) {
+  if (!val) return '—'
+  const str = String(val).slice(0, 10)
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str)
+  if (!m) return fmtDate(val)
+  return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10))
+    .toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
 async function load() {
   state = await api('/opening')
-  if (state.state === 'locked') return renderLocked()
+  if (state.state === 'completed' || state.state === 'locked') return renderLocked()
   renderHome()
 }
 
@@ -87,9 +108,62 @@ async function load() {
 
 function renderHome() {
   const { session, checklist, progress, done, total } = state
-  const badge = state.state === 'ready'
-    ? '<span class="chip chip-green">Hazır</span>'
-    : '<span class="chip chip-yellow">Açılış henüz tamamlanmadı</span>'
+  const isOpen = state.state === 'open'
+
+  const titleEl = document.querySelector('.page-header h1')
+  const subEl = document.querySelector('.page-header p')
+  if (isOpen) {
+    if (titleEl) titleEl.textContent = 'Açılış Verilerini Tamamla'
+    if (subEl) subEl.textContent = 'Sistem kullanıma açık. Eksik başlangıç stokları, hazır ürünler ve diğer açılış bilgilerini burada tamamlayabilirsiniz.'
+  } else {
+    if (titleEl) titleEl.textContent = 'Açılış / Gerçek Başlangıç'
+    if (subEl) subEl.textContent = "Sistemin kullanılmaya başlanacağı gün Decco'nun gerçek fiziksel ve finansal durumu"
+  }
+
+  const badge = isOpen
+    ? '<span class="chip chip-green">Sistem Açık (Operasyonel)</span>'
+    : '<span class="chip chip-yellow">PRE-OPENING (Kapalı)</span>'
+
+  const noteBox = isOpen
+    ? `<div class="op-note" style="background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.28)">
+        <strong>SİSTEM OPERASYONEL.</strong> Decco OS günlük işlemlere açılmıştır. Henüz tamamlanmamış açılış kalemleri
+        (sayılmamış malzemeler, doğrulanmamış hesaplar/tedarikçiler) koruyucu kontrollerle güvenceye alınmıştır.
+        Eksik verileri bu sayfadan tamamladıkça ilgili kısıtlamalar kalkacaktır.
+      </div>`
+    : `<div class="op-note">
+        <strong>PRE-OPENING modu.</strong> Açılış başlatılana kadar canlı stok ve para hareketleri
+        (stok girişi, ödeme, satın alma, üretim tamamlama) engellenir. Böylece sayım günlük
+        hareketlerle karışmaz. Geçerli bir Go-live tarihiyle sistemi operasyonel kullanıma açabilirsiniz.
+      </div>`
+
+  const actionCard = isOpen
+    ? `<div class="card" style="margin-top:16px;padding:18px">
+        <h3 style="margin:0 0 4px;font-size:.95rem">Açılışı Tamamla ve Kilitle</h3>
+        <p style="font-size:.8rem;color:var(--text-secondary);margin:0 0 14px">
+          Tüm 8 bölüm tamamlandığında açılış kayıtları nihai hale getirilip kilitlenir. Sistem operasyonel kalmaya devam eder.
+        </p>
+        <button class="btn btn-primary" id="lock-btn" ${done === total ? '' : 'disabled'}>
+          🔒 Açılışı Tamamla ve Kilitle
+        </button>
+        ${done === total ? '' :
+          `<div style="font-size:.76rem;color:var(--text-secondary);margin-top:9px">
+            Tamamlanması gerekenler: ${checklist.filter(c => !c.done).map(c => `${c.label} (${c.status === 'uncounted' ? 'Sayılmadı' : 'Eksik'})`).join(', ')}
+          </div>`}
+      </div>`
+    : `<div class="card" style="margin-top:16px;padding:18px">
+        <h3 style="margin:0 0 4px;font-size:.95rem">Sistemi Kullanıma Aç (Go-Live)</h3>
+        <p style="font-size:.8rem;color:var(--text-secondary);margin:0 0 14px">
+          Sistemi günlük işlemlere açar. Sayımı henüz bitmemiş ham maddeler veya hazır ürünler sistem açıkken de
+          tamamlanabilir; sayılmayan kalemler kullanılana kadar koruma altında kalır.
+        </p>
+        <button class="btn btn-primary" id="start-btn" ${isValidGoLiveDate(session.go_live_date) ? '' : 'disabled'}>
+          🚀 Sistemi Kullanıma Aç
+        </button>
+        ${!isValidGoLiveDate(session.go_live_date) ? `
+          <div style="font-size:.76rem;color:var(--danger,#e53e3e);margin-top:9px">
+            Sistemi açmak için yukarıdan geçerli bir Go-live tarihi girilmelidir.
+          </div>` : ''}
+      </div>`
 
   $('view').innerHTML = `
     <div class="op-hero">
@@ -97,7 +171,10 @@ function renderHome() {
         <div>
           <div style="font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Go-live tarihi</div>
           <input type="date" id="golive" class="form-control" style="width:180px"
-            value="${session.go_live_date ? String(session.go_live_date).slice(0,10) : ''}" />
+            min="2000-01-01" max="2100-12-31"
+            value="${session.go_live_date ? String(session.go_live_date).slice(0,10) : ''}"
+            ${isOpen ? 'disabled readonly title="Operasyonel modda Go-live tarihi değiştirilemez"' : ''} />
+          <div id="golive-err" style="display:none;color:var(--danger,#e53e3e);font-size:.72rem;margin-top:4px">Geçerli bir tarih girin (örn. 10.09.2026)</div>
         </div>
         <div style="text-align:right">
           <div style="font-size:2rem;font-weight:700;line-height:1">${progress}<span style="font-size:1rem">%</span></div>
@@ -108,55 +185,95 @@ function renderHome() {
       <div style="font-size:.78rem;color:var(--text-secondary);margin-top:8px">${done} / ${total} bölüm tamamlandı</div>
     </div>
 
-    <div class="op-note">
-      <strong>PRE-OPENING modu.</strong> Açılış kilitlenene kadar canlı stok ve para hareketleri
-      (stok girişi, ödeme, satın alma, üretim tamamlama) engellenir. Böylece sayım günlük
-      hareketlerle karışmaz. Tarihsel kayıtlar bu ekrandan değiştirilmez.
-    </div>
+    ${noteBox}
 
     <div class="op-grid">
-      ${checklist.map(c => `
+      ${checklist.map(c => {
+        const chip = c.status === 'completed'
+          ? '<span class="chip chip-green" style="font-size:.7rem">Tamamlandı</span>'
+          : (c.status === 'uncounted'
+             ? '<span class="chip chip-yellow" style="font-size:.7rem;background:rgba(234,179,8,.15)">Sayılmadı</span>'
+             : '<span class="chip chip-yellow" style="font-size:.7rem">Eksik</span>')
+        const icon = c.status === 'completed' ? '✅' : (c.status === 'uncounted' ? '📋' : '⏳')
+        return `
         <div class="op-card ${c.done ? 'done' : ''}" data-key="${c.key}">
-          <div class="op-ico">${c.done ? '✅' : '⏳'}</div>
+          <div class="op-ico">${icon}</div>
           <div style="min-width:0;flex:1">
-            <h3>${SECTIONS[c.key]?.icon || ''} ${c.label}</h3>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+              <h3 style="margin:0">${SECTIONS[c.key]?.icon || ''} ${c.label}</h3>
+              ${chip}
+            </div>
             <p>${c.detail}</p>
           </div>
-        </div>`).join('')}
+        </div>`}).join('')}
     </div>
 
-    <div class="card" style="margin-top:16px;padding:18px">
-      <h3 style="margin:0 0 4px;font-size:.95rem">Açılışı Kilitle</h3>
-      <p style="font-size:.8rem;color:var(--text-secondary);margin:0 0 14px">
-        Yalnızca doğrulanmış gerçek bakiyeler sisteme işlenir. Tarihsel satış ve giderler
-        yeniden oluşturulmaz. Bu işlem geri alınamaz.
-      </p>
-      <button class="btn btn-primary" id="lock-btn" ${state.state === 'ready' ? '' : 'disabled'}>
-        🔒 Açılışı Kilitle
-      </button>
-      ${state.state === 'ready' ? '' :
-        `<div style="font-size:.76rem;color:var(--text-secondary);margin-top:9px">
-          Eksik: ${checklist.filter(c => !c.done).map(c => c.label).join(', ')}
-        </div>`}
-    </div>`
+    ${actionCard}`
 
-  $('golive').onchange = async e => {
-    await api('/opening/session', { method: 'PUT', body: { go_live_date: e.target.value } })
-    toast('Go-live tarihi kaydedildi'); load()
+  let savingGoLive = false
+  const handleGoLiveChange = async e => {
+    if (savingGoLive || isOpen) return
+    const val = e.target.value?.trim()
+    const errEl = $('golive-err')
+
+    // boş / partial ise kaydetme
+    if (!val) {
+      if (errEl) errEl.style.display = 'none'
+      return
+    }
+
+    if (!isValidGoLiveDate(val)) {
+      if (errEl) errEl.style.display = 'block'
+      toast('Geçerli bir tarih girin (örn. 10.09.2026)', 'error')
+      return
+    }
+
+    if (errEl) errEl.style.display = 'none'
+    const saved = state?.session?.go_live_date ? String(state.session.go_live_date).slice(0, 10) : ''
+    if (val === saved) return
+
+    savingGoLive = true
+    try {
+      await api('/opening/session', { method: 'PUT', body: { go_live_date: val } })
+      toast('Go-live tarihi kaydedildi')
+      load()
+    } catch (err) {
+      if (errEl) errEl.style.display = 'block'
+      toast(err.message || 'Geçerli bir tarih girin (örn. 10.09.2026)', 'error')
+    } finally {
+      savingGoLive = false
+    }
   }
+
+  if (!isOpen) {
+    $('golive').onchange = handleGoLiveChange
+    $('golive').onblur = handleGoLiveChange
+    $('golive').oninput = () => {
+      const errEl = $('golive-err')
+      if (errEl) errEl.style.display = 'none'
+    }
+  }
+
   document.querySelectorAll('.op-card').forEach(c =>
     c.onclick = () => openSection(c.dataset.key))
-  $('lock-btn').onclick = confirmLock
+
+  if ($('start-btn')) $('start-btn').onclick = confirmStartOperations
+  if ($('lock-btn')) $('lock-btn').onclick = confirmLock
 }
 
 function renderLocked() {
+  const titleEl = document.querySelector('.page-header h1')
+  const subEl = document.querySelector('.page-header p')
+  if (titleEl) titleEl.textContent = 'Açılış Tamamlandı (Nihai)'
+  if (subEl) subEl.textContent = 'Açılış kayıtları kilitlenmiştir ve sistem operasyoneldir.'
+
   const d = state.session.locked_at
   $('view').innerHTML = `
     <div class="card" style="padding:40px;text-align:center">
       <div style="font-size:2.6rem;margin-bottom:12px">🔒</div>
-      <h2 style="margin:0 0 8px;font-size:1.15rem">Açılış kilitlendi</h2>
+      <h2 style="margin:0 0 8px;font-size:1.15rem">Açılış kilitlendi ve tamamlandı</h2>
       <p style="color:var(--text-secondary);font-size:.85rem;margin:0">
-        Go-live: <strong>${fmtDate(state.session.go_live_date)}</strong><br/>
+        Go-live: <strong>${fmtCalDate(state.session.go_live_date)}</strong><br/>
         Kilitlenme: ${fmtDate(d)}
       </p>
       <p style="color:var(--text-secondary);font-size:.8rem;margin-top:18px;max-width:460px;margin-left:auto;margin-right:auto">
@@ -184,34 +301,40 @@ async function openSection(key) {
 
 async function secMaterials() {
   const rows = await api('/opening/materials')
+  const isOpen = state.state === 'open'
   $('view').innerHTML = `${back}
     <div class="op-note">
       Excel'de miktarın 0 olması <strong>"stok yok" demek değildir</strong> — bu kalemler fiziksel
       sayım bekliyor. Miktar alanı <strong>boş bırakılırsa "sayılmadı"</strong> sayılır ve açılış
       stok hareketi oluşmaz. Gerçekten sıfırsa <strong>0</strong> yazın.
+      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Önceden sayımı tamamlanmış malzemeler kilitlidir. Henüz sayılmamış kalemleri buradan sayarak sisteme ekleyebilirsiniz.' : ''}
     </div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>SKU</th><th>Malzeme</th><th>Birim</th><th>Konum</th>
         <th style="text-align:right">Sayım</th><th style="text-align:right">Birim maliyet</th>
         <th style="text-align:right">Toplam değer</th><th>Durum</th></tr></thead>
-      <tbody>${rows.map(r => `
-        <tr data-id="${r.id}">
+      <tbody>${rows.map(r => {
+        const isCounted = r.counted_at !== null
+        const isLocked = isOpen && isCounted
+        return `
+        <tr data-id="${r.id}" data-counted="${isCounted ? '1' : '0'}">
           <td><code>${r.sku}</code></td>
           <td>${r.name}</td>
           <td class="td-muted">${r.unit}</td>
-          <td><input class="form-control f-loc" style="width:110px" value="${r.location || ''}" /></td>
+          <td><input class="form-control f-loc" style="width:110px" value="${r.location || ''}" ${isLocked ? 'disabled' : ''} /></td>
           <td style="text-align:right"><input class="form-control num-in f-qty" type="number" step="0.0001"
-            placeholder="sayılmadı" value="${r.counted_qty ?? ''}" /></td>
+            placeholder="sayılmadı" value="${r.counted_qty ?? ''}" ${isLocked ? 'disabled' : ''} /></td>
           <td style="text-align:right"><input class="form-control num-in f-cost" type="number" step="0.01"
-            value="${r.unit_cost ?? ''}" /></td>
-          <td style="text-align:right" class="f-total">${r.counted_at ? money(r.total_value) : '—'}</td>
-          <td>${r.counted_at
-            ? '<span class="chip chip-green">Sayıldı</span>'
-            : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
-        </tr>`).join('')}</tbody>
+            value="${r.unit_cost ?? ''}" ${isLocked ? 'disabled' : ''} /></td>
+          <td style="text-align:right" class="f-total">${isCounted ? money(r.total_value) : '—'}</td>
+          <td>${isCounted
+            ? (isOpen ? '<span class="chip chip-green">Sayıldı (Kilitli)</span>' : '<span class="chip chip-green">Sayıldı</span>')
+            : '<span class="chip chip-yellow">Sayılmadı</span>'}</td>
+        </tr>`}).join('')}</tbody>
     </table></div></div>`
 
   document.querySelectorAll('tr[data-id]').forEach(tr => {
+    if (tr.dataset.counted === '1' && isOpen) return
     const save = async () => {
       const qty = numOrNull(tr.querySelector('.f-qty').value)
       const cost = numOrNull(tr.querySelector('.f-cost').value)
@@ -220,7 +343,13 @@ async function secMaterials() {
         toast('Miktar > 0 olduğunda birim maliyet zorunludur', 'error'); return
       }
       const body = { counted_qty: qty, unit_cost: cost, location: tr.querySelector('.f-loc').value }
-      await api(`/opening/materials/${tr.dataset.id}`, { method: 'PUT', body })
+      if (isOpen) {
+        if (qty === null) return
+        await api(`/opening/materials/${tr.dataset.id}/complete`, { method: 'POST', body })
+        toast('Malzeme açılış sayımı tamamlandı')
+      } else {
+        await api(`/opening/materials/${tr.dataset.id}`, { method: 'PUT', body })
+      }
       secMaterials()
     }
     tr.querySelectorAll('.f-qty,.f-cost,.f-loc').forEach(i => i.onchange = save)
@@ -336,14 +465,15 @@ window.__close = () => closeModal()
 
 async function secAccounts() {
   const rows = await api('/opening/accounts')
+  const isOpen = state.state === 'open'
   $('view').innerHTML = `${back}
     <div class="op-note">
       Gerçek açılış bakiyelerini elle girin. Tarihsel <strong>53.298 TL tahsilat buraya
       aktarılmaz</strong> — o geçmişte tahsil edilen toplamdır, bugünkü para değildir.
-      Bakiye doğrudan yazılmaz; kilitte <code>opening_balance</code> hareketi üzerinden oluşur.
+      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Önceden doğrulanmış hesaplar kilitlidir. Henüz doğrulanmamış hesapların açılış bakiyesini buradan tamamlayabilirsiniz.' : 'Bakiye doğrudan yazılmaz; sistem açıldığında opening_balance hareketi üzerinden oluşur.'}
     </div>
     ${lineTable(rows, r => `<td>${r.name} <span class="td-muted">(${r.account_type})</span></td>`,
-      'Açılış tutarı')}`
+      'Açılış tutarı', r => isOpen && r.amount !== null)}`
   wireLines(secAccounts)
 }
 
@@ -351,41 +481,53 @@ async function secAccounts() {
 
 async function secReceivables() {
   const rows = await api('/opening/receivables')
+  const isOpen = state.state === 'open'
   $('view').innerHTML = `${back}
     <div class="op-note">
       Tarihsel sistemde açık görünen ${rows.length} sipariş. <strong>Siz onaylamadan açılış
       alacağı oluşturulmaz.</strong> Tarihsel sipariş kaydı (ödenen tutar) değiştirilmez;
       teyidiniz ayrı bir OPENING kaydı olarak tutulur.
+      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Teyit edilmiş alacaklar kilitlidir. Henüz teyit edilmemiş tarihsel alacakları onaylayabilir veya kapatabilirsiniz.' : ''}
     </div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Sipariş</th><th>Müşteri</th><th>Tarih</th>
         <th style="text-align:right">Tarihsel kalan</th>
         <th style="text-align:right">Gerçek kalan</th><th>Durum</th><th></th></tr></thead>
-      <tbody>${rows.map(r => `
-        <tr data-id="${r.id}">
+      <tbody>${rows.map(r => {
+        const isConfirmed = ['confirmed', 'closed'].includes(r.status)
+        const isLocked = isOpen && isConfirmed
+        return `
+        <tr data-id="${r.id}" data-locked="${isLocked ? '1' : '0'}">
           <td class="td-muted">${(r.order_ref || '').split(' · ')[0]}</td>
           <td>${r.customer_name}</td>
           <td class="td-muted">${fmtDate(r.order_date)}</td>
           <td style="text-align:right" class="td-muted">${money(r.previous_value)}</td>
           <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
-            value="${r.amount ?? ''}" ${r.status === 'closed' ? 'disabled' : ''} /></td>
+            value="${r.amount ?? ''}" ${r.status === 'closed' || isLocked ? 'disabled' : ''} /></td>
           <td>${r.status === 'confirmed' ? '<span class="chip chip-green">Teyit edildi</span>'
              : r.status === 'closed' ? '<span class="chip chip-gray">Kapandı</span>'
              : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
           <td style="white-space:nowrap">
+            ${isLocked ? '' : `
             <button class="btn btn-sm" data-act="confirmed" data-id="${r.id}">Hâlâ alacak</button>
-            <button class="btn btn-sm" data-act="closed" data-id="${r.id}">Kapandı</button>
+            <button class="btn btn-sm" data-act="closed" data-id="${r.id}">Kapandı</button>`}
           </td>
-        </tr>`).join('')}</tbody>
+        </tr>`}).join('')}</tbody>
     </table></div></div>`
 
-  document.querySelectorAll('.f-amt').forEach(i => i.onchange = async e => {
-    const id = e.target.closest('tr').dataset.id
-    await api(`/opening/lines/${id}`, { method: 'PUT', body: { amount: numOrNull(e.target.value) } })
-    secReceivables()
+  document.querySelectorAll('tr[data-id]').forEach(tr => {
+    if (tr.dataset.locked === '1') return
+    const amtInput = tr.querySelector('.f-amt')
+    if (amtInput) {
+      amtInput.onchange = async e => {
+        await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: { amount: numOrNull(e.target.value) } })
+        secReceivables()
+      }
+    }
   })
   document.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
     const tr = b.closest('tr')
+    if (tr && tr.dataset.locked === '1') return
     const amount = b.dataset.act === 'closed' ? 0 : numOrNull(tr.querySelector('.f-amt').value)
     await api(`/opening/lines/${b.dataset.id}`, { method: 'PUT',
       body: { amount, status: b.dataset.act } })
@@ -397,23 +539,15 @@ async function secReceivables() {
 
 async function secSuppliers() {
   const rows = await api('/opening/suppliers')
+  const isOpen = state.state === 'open'
   $('view').innerHTML = `${back}
     <div class="op-note">
       Gerçek kalan borcu elle girin. <strong>Geçmiş satın almaların toplamından otomatik borç
       hesaplanmaz</strong> — yandaki tarihsel harcama yalnızca referans içindir.
+      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Önceden doğrulanmış tedarikçiler kilitlidir. Henüz doğrulanmamış tedarikçilerin açılış borcunu buradan tamamlayabilirsiniz.' : ''}
     </div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Tedarikçi</th><th style="text-align:right">Tarihsel harcama</th>
-        <th style="text-align:right">Gerçek kalan borç</th><th>Not / vade</th></tr></thead>
-      <tbody>${rows.map(r => `
-        <tr data-id="${r.id}">
-          <td>${r.name}</td>
-          <td style="text-align:right" class="td-muted">${money(r.historical_spend)}</td>
-          <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
-            placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
-          <td><input class="form-control f-notes" value="${r.notes || ''}" placeholder="vade / açıklama" /></td>
-        </tr>`).join('')}</tbody>
-    </table></div></div>`
+    ${lineTable(rows, r => `<td>${r.name} <span class="td-muted">(tarihsel harcama: ${money(r.historical_spend)})</span></td>`,
+      'Gerçek kalan borç', r => isOpen && r.amount !== null)}`
   wireLines(secSuppliers)
 }
 
@@ -584,32 +718,72 @@ function assetForm() {
 
 // --- Ortak tutar tablosu (kasa / tedarikçi) ---------------------------------
 
-function lineTable(rows, firstCell, amountLabel) {
+function lineTable(rows, firstCell, amountLabel, isRowLockedFn = null) {
   return `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>Kalem</th><th style="text-align:right">${amountLabel}</th><th>Not</th></tr></thead>
-    <tbody>${rows.map(r => `
-      <tr data-id="${r.id}">
+    <thead><tr><th>Kalem</th><th style="text-align:right">${amountLabel}</th><th>Not</th><th>Durum</th></tr></thead>
+    <tbody>${rows.map(r => {
+      const isLocked = typeof isRowLockedFn === 'function' ? isRowLockedFn(r) : !!isRowLockedFn
+      const isVerified = r.amount !== null
+      return `
+      <tr data-id="${r.id}" data-locked="${isLocked ? '1' : '0'}">
         ${firstCell(r)}
         <td style="text-align:right"><input class="form-control num-in f-amt" type="number" step="0.01"
-          placeholder="girilmedi" value="${r.amount ?? ''}" /></td>
-        <td><input class="form-control f-notes" value="${r.notes || ''}" /></td>
-      </tr>`).join('')}</tbody>
+          placeholder="girilmedi" value="${r.amount ?? ''}" ${isLocked ? 'disabled' : ''} /></td>
+        <td><input class="form-control f-notes" value="${r.notes || ''}" ${isLocked ? 'disabled' : ''} /></td>
+        <td>${isVerified ? '<span class="chip chip-green">Doğrulandı</span>' : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
+      </tr>`}).join('')}</tbody>
   </table></div></div>`
 }
 
 function wireLines(reload) {
   document.querySelectorAll('tr[data-id]').forEach(tr => {
+    if (tr.dataset.locked === '1') return
     const save = async () => {
       await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: {
         amount: numOrNull(tr.querySelector('.f-amt').value),
         notes: tr.querySelector('.f-notes')?.value ?? null } })
+      toast('Kaydedildi')
       reload()
     }
     tr.querySelectorAll('.f-amt,.f-notes').forEach(i => i.onchange = save)
   })
 }
 
-// --- Kilit ------------------------------------------------------------------
+// --- Operasyonları Başlat ve Kilit -------------------------------------------
+
+function confirmStartOperations() {
+  openModal(`
+    <div class="modal-header"><h2>Sistemi Kullanıma Aç</h2>
+      <button class="modal-close" onclick="window.__close()">✕</button></div>
+    <div class="modal-body">
+      <p style="font-size:.86rem;line-height:1.6;margin:0 0 12px">
+        Go-live tarihi: <strong>${fmtCalDate(state.session.go_live_date)}</strong><br/>
+        Sistem günlük operasyonel kullanıma açılacaktır:
+      </p>
+      <ul style="font-size:.83rem;line-height:1.8;color:var(--text-secondary);margin:0 0 14px;padding-left:20px">
+        <li>Sayılan ham maddeler ve hazır ürünler canlı stoğa işlenecek</li>
+        <li>Doğrulanmış kasa/banka ve tedarikçi borçları açılış bakiyesi olarak kaydedilecek</li>
+        <li>Henüz sayılmamış veya doğrulanmamış kalemler açılış tamamlanana kadar koruma altında kalacak</li>
+      </ul>
+      <div class="op-note" style="margin:0">
+        Go-live tarihi sistem açıldıktan sonra değiştirilemez. Eksik sayım ve verileri sistem açıkken tamamlayabilirsiniz.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="window.__close()">Vazgeç</button>
+      <button class="btn btn-primary" id="do-start">🚀 Kullanıma Aç</button>
+    </div>`)
+  $('do-start').onclick = async () => {
+    try {
+      await api('/opening/start-operations', { method: 'POST' })
+      closeModal()
+      toast('Sistem kullanıma açıldı!')
+      load()
+    } catch (e) {
+      toast(e.message, 'error')
+    }
+  }
+}
 
 function confirmLock() {
   openModal(`
@@ -617,18 +791,16 @@ function confirmLock() {
       <button class="modal-close" onclick="window.__close()">✕</button></div>
     <div class="modal-body">
       <p style="font-size:.86rem;line-height:1.6;margin:0 0 12px">
-        Go-live <strong>${fmtDate(state.session.go_live_date)}</strong> tarihiyle
-        şunlar işlenecek:</p>
+        Go-live <strong>${fmtCalDate(state.session.go_live_date)}</strong> tarihiyle
+        açılış tamamlanacak ve kilitlenecektir:</p>
       <ul style="font-size:.83rem;line-height:1.8;color:var(--text-secondary);margin:0 0 14px;padding-left:20px">
-        <li>Sayılan ham maddeler için <code>opening_in</code> stok hareketi</li>
-        <li>Hazır ürün lotları (<code>source=OPENING</code>)</li>
-        <li>Kasa/banka için <code>opening_balance</code> hareketi</li>
-        <li>Tedarikçi borçları ve kurucu yükümlülüğü</li>
+        <li>Kalan sayılan ham maddeler ve hazır ürün lotları kesinleşecek</li>
+        <li>Kasa/banka, tedarikçi borçları ve kurucu yükümlülüğü nihai açılış verisi olarak kilitlenecek</li>
+        <li>Sistem operasyonel kalmaya devam edecek</li>
       </ul>
       <div class="op-note" style="margin:0">
-        Tarihsel siparişler, ödemeler ve giderler <strong>değişmez</strong>; geçmiş satış/gider
-        yeniden oluşturulmaz. Tüm kayıtlar <code>OPENING</code> referansıyla izlenir ve veritabanı
-        kısıtlarıyla çift kayıt engellenir. <strong>Bu işlem geri alınamaz.</strong>
+        Tarihsel siparişler, ödemeler ve giderler <strong>değişmez</strong>. Tüm kayıtlar <code>OPENING</code>
+        referansıyla izlenir. <strong>Bu kilit işlemi geri alınamaz.</strong>
       </div>
     </div>
     <div class="modal-footer">
@@ -638,7 +810,7 @@ function confirmLock() {
   $('do-lock').onclick = async () => {
     try {
       await api('/opening/lock', { method: 'POST' })
-      closeModal(); toast('Açılış kilitlendi — sistem canlı modda'); load()
+      closeModal(); toast('Açılış tamamlandı ve kilitlendi — sistem canlı modda'); load()
     } catch (e) { toast(e.message, 'error') }
   }
 }

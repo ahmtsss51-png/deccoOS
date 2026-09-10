@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
+import { assertMaterialCounted } from '../opening-guard.js'
 
 const router = Router()
 
@@ -58,6 +59,9 @@ router.post('/:id/movements', async (req, res, next) => {
     }
     // Çıkış hareketi için negatif uygula
     const OUTBOUND = ['production_out', 'scrap_out', 'return_out', 'sale_out']
+    if (OUTBOUND.includes(movement_type)) {
+      await assertMaterialCounted(req.params.id)
+    }
     const signedQty = OUTBOUND.includes(movement_type) ? -Math.abs(parseFloat(quantity)) : Math.abs(parseFloat(quantity))
     const isIn = signedQty > 0
 

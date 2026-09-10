@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
-import { isSystemOpen } from '../opening-guard.js'
+import { isSystemOpen, assertSupplierReady, assertAccountReady } from '../opening-guard.js'
 
 const router = Router()
 
@@ -143,6 +143,8 @@ router.post('/:id/payments', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Hesap ve geçerli tutar zorunludur' })
     }
+    await assertSupplierReady(req.params.id)
+    await assertAccountReady(account_id)
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
     if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
     const amt = parseFloat(amount)
@@ -181,6 +183,10 @@ router.post('/:id/returns', async (req, res, next) => {
     if (settlement === 'refund' && !account_id) {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Nakit iadede hesap seçilmeli' })
+    }
+    await assertSupplierReady(req.params.id)
+    if (settlement === 'refund' && account_id) {
+      await assertAccountReady(account_id)
     }
 
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
@@ -268,6 +274,10 @@ router.post('/purchases', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'En az 1 malzeme satırı gerekli' })
     }
+    await assertSupplierReady(supplier_id)
+    if (paid_amount && account_id) {
+      await assertAccountReady(account_id)
+    }
 
     const total = lines.reduce((s, l) => s + l.quantity * l.unit_cost, 0)
 
@@ -320,6 +330,7 @@ router.post('/:id/discounts', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Geçerli iskonto tutarı zorunludur' })
     }
+    await assertSupplierReady(req.params.id)
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
     if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
 

@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
+import { assertMaterialCounted } from '../opening-guard.js'
 
 const router = Router()
 
@@ -13,6 +14,7 @@ const VALID_TRANSITIONS = {
 // CHK-P04: BOM'dan malzeme rezervasyonu — job_id ile izlenebilir
 async function reserveMaterials(client, job, snapshot) {
   for (const line of snapshot) {
+    if (line.material_id) await assertMaterialCounted(line.material_id)
     const qty = parseFloat(line.quantity_per_unit ?? line.quantity) * job.quantity * (1 + parseFloat(line.waste_rate || 0))
     await client.query(
       'UPDATE materials SET reserved_stock = reserved_stock + $1 WHERE id = $2',
@@ -226,6 +228,7 @@ router.post('/:id/complete', async (req, res, next) => {
     for (const line of lines) {
       const matId = selections[line.slot_code] || line.material_id
       if (!matId) continue
+      await assertMaterialCounted(matId)
       const used = line.quantity * job.quantity * (1 + line.waste_rate)
       await client.query(
         'UPDATE materials SET current_stock = current_stock - $1 WHERE id=$2',

@@ -1,11 +1,12 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
-import { isSystemOpen } from '../opening-guard.js'
+import { isSystemOpen, assertAccountReady, assertOrderPayable } from '../opening-guard.js'
 
 const router = Router()
 
 // Ortak çekirdek: müşteri tahsilatı — finance/collections ve orders/:id/payments tarafından kullanılır
 export async function applyCustomerPayment(client, { customer_id, account_id, amount, method, paid_at, description, allocations }) {
+  if (account_id) await assertAccountReady(account_id)
   const { rows: openOrders } = await client.query(`
     SELECT id, order_no, total_amount, paid_amount, status,
            (total_amount - paid_amount) AS open_amount
@@ -41,6 +42,7 @@ export async function applyCustomerPayment(client, { customer_id, account_id, am
   const paymentId = cpRows[0].id
 
   for (const alloc of allocs) {
+    await assertOrderPayable(alloc.order_id)
     const order = openOrders.find(o => o.id === alloc.order_id)
     if (!order) throw Object.assign(new Error('Geçersiz sipariş: ' + alloc.order_id), { status: 400 })
     const applying = parseFloat(alloc.amount)
@@ -180,6 +182,7 @@ router.post('/transactions', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Hesap ve tutar zorunludur' })
     }
+    await assertAccountReady(account_id)
     await client.query(
       `INSERT INTO transactions (account_id,amount,transaction_type,description,category,transaction_date)
        VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,NOW()))`,
@@ -204,6 +207,8 @@ router.post('/transfer', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Kaynak ve hedef hesap aynı olamaz' })
     }
+    await assertAccountReady(from_account_id)
+    await assertAccountReady(to_account_id)
     if (!amt || amt <= 0) {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Tutar 0\'dan büyük olmalıdır' })
