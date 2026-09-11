@@ -665,3 +665,24 @@ BEGIN
     END IF;
   END IF;
 END $$;
+
+-- Karton Kutu 15×11×5 cm malzeme kartı (Kutufix) ve sayılmamış açılış satırı (idempotent)
+DO $$
+DECLARE
+  v_mat_id INT;
+  v_session_id INT;
+BEGIN
+  SELECT id INTO v_mat_id FROM materials WHERE sku = 'PKG-KTU-15115' OR name = 'Karton Kutu 15×11×5 cm' LIMIT 1;
+  IF v_mat_id IS NULL THEN
+    INSERT INTO materials (sku, name, family, material_type, unit, current_stock, reserved_stock, avg_cost, reorder_level)
+    VALUES ('PKG-KTU-15115', 'Karton Kutu 15×11×5 cm', 'Kutu', 'packaging', 'adet', 0, 0, 0, NULL)
+    RETURNING id INTO v_mat_id;
+  END IF;
+
+  SELECT id INTO v_session_id FROM opening_sessions WHERE status = 'open' ORDER BY id DESC LIMIT 1;
+  IF v_session_id IS NOT NULL THEN
+    INSERT INTO opening_lines (session_id, section, ref_key, material_id, status, location)
+    VALUES (v_session_id, 'material', v_mat_id::text, v_mat_id, 'pending', 'ATOLYE')
+    ON CONFLICT (session_id, section, ref_key) DO NOTHING;
+  END IF;
+END $$;
