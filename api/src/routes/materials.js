@@ -57,9 +57,9 @@ router.post('/:id/movements', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Miktar pozitif olmalıdır; yön hareket türüyle belirlenir' })
     }
-    // Çıkış hareketi için negatif uygula
+    // Çıkış veya sayım düzeltme hareketleri için açılış sayım kontrolü
     const OUTBOUND = ['production_out', 'scrap_out', 'return_out', 'sale_out']
-    if (OUTBOUND.includes(movement_type)) {
+    if (movement_type === 'count_adjust' || OUTBOUND.includes(movement_type)) {
       await assertMaterialCounted(req.params.id)
     }
     const signedQty = OUTBOUND.includes(movement_type) ? -Math.abs(parseFloat(quantity)) : Math.abs(parseFloat(quantity))
@@ -75,13 +75,13 @@ router.post('/:id/movements', async (req, res, next) => {
     if (isIn && unit_cost) {
       await client.query(`
         UPDATE materials SET
-          avg_cost = COALESCE((current_stock * avg_cost + $1 * $2) / NULLIF(current_stock + $1, 0), avg_cost),
-          current_stock = current_stock + $1
+          avg_cost = COALESCE((current_stock * avg_cost + $1::numeric * $2::numeric) / NULLIF(current_stock + $1::numeric, 0), avg_cost),
+          current_stock = current_stock + $1::numeric
         WHERE id=$3
       `, [signedQty, unit_cost, req.params.id])
     } else {
       await client.query(
-        'UPDATE materials SET current_stock=current_stock+$1 WHERE id=$2',
+        'UPDATE materials SET current_stock=current_stock+$1::numeric WHERE id=$2',
         [signedQty, req.params.id]
       )
     }

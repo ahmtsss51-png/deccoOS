@@ -42,9 +42,9 @@ export async function requireOpened(req, res, next) {
   } catch (e) { next(e) }
 }
 
-function capabilityError(msg) {
+function capabilityError(msg, status = 409) {
   const err = new Error(msg)
-  err.status = 400
+  err.status = status
   return err
 }
 
@@ -119,6 +119,6 @@ export async function assertMaterialCounted(materialId) {
     [s.id, materialId]
   )
   if (rows.length > 0 && rows[0].counted_at === null) {
-    throw capabilityError('Bu malzemenin açılış sayımı henüz yapılmamıştır (Açılış Verilerini Tamamla).')
+    throw capabilityError('Bu malzemenin açılış sayımı tamamlanmamış. Açılış Verilerini Tamamla ekranından sayım yapın.', 409)
   }
 }

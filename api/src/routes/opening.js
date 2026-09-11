@@ -446,6 +446,132 @@ router.post('/materials/:lineId/complete', async (req, res, next) => {
   }
 })
 
+// Açılış sayımı düzeltme endpoint'i (yalnız sonraki stok hareketi yoksa ve open modda çalışır)
+router.post('/materials/:lineId/correct', async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const s = await getLatestSession()
+    if (!s) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Açılış oturumu bulunamadı' })
+    }
+    if (s.locked_at !== null || s.status === 'completed') {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: 'Açılış oturumu kilitlenmiş, düzeltme yapılamaz' })
+    }
+    if (s.status !== 'open') {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: 'Açılış düzeltmesi yalnızca sistem operasyonel durumdayken yapılabilir' })
+    }
+
+    const { rows: lines } = await client.query(
+      `SELECT l.*, m.sku FROM opening_lines l JOIN materials m ON m.id = l.material_id
+       WHERE l.id = $1 AND l.session_id = $2 AND l.section = 'material' FOR UPDATE`,
+      [req.params.lineId, s.id]
+    )
+    if (!lines.length) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Malzeme açılış satırı bulunamadı' })
+    }
+    const line = lines[0]
+    if (line.counted_at === null) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Henüz sayımı yapılmamış malzeme için düzeltme yapılamaz' })
+    }
+
+    // Güvenlik kuralı: opening sonrasında başka stok hareketi varsa düzeltme engellenir
+    const { rows: subsequentMovements } = await client.query(
+      `SELECT id, movement_type, reference_type, created_at
+       FROM stock_movements
+       WHERE material_id = $1
+         AND (reference_type IS NULL OR reference_type NOT IN ('OPENING', 'OPENING_COMPLETION', 'OPENING_CORRECTION'))
+       LIMIT 1`,
+      [line.material_id]
+    )
+    if (subsequentMovements.length > 0) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({
+        error: 'Bu malzemede açılış sonrasında başka stok hareketleri oluştuğundan açılış sayımı düzeltilemez. Stok ekranından düzeltme yapın.'
+      })
+    }
+
+    const { counted_qty, unit_cost, location, notes } = req.body
+    if (counted_qty === '' || counted_qty === null || counted_qty === undefined) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Sayım miktarı girilmelidir' })
+    }
+    const newQty = parseFloat(counted_qty)
+    if (isNaN(newQty) || newQty < 0) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Geçersiz sayım miktarı' })
+    }
+    if (newQty > 0 && (unit_cost === null || unit_cost === undefined || unit_cost === '')) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Miktar > 0 olduğunda birim maliyet zorunludur' })
+    }
+    const newCost = newQty > 0 ? parseFloat(unit_cost) : (unit_cost ? parseFloat(unit_cost) : 0)
+    if (isNaN(newCost) || newCost < 0) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Geçersiz birim maliyet' })
+    }
+
+    const oldQty = parseFloat(line.counted_qty) || 0
+    const oldCost = parseFloat(line.unit_cost) || 0
+    const loc = location || line.location || 'ATOLYE'
+    const noteText = notes ? `Açılış düzeltme (Önceki: ${oldQty} @ ${oldCost} TL): ${notes}` : `Açılış düzeltme (Önceki: ${oldQty} @ ${oldCost} TL)`
+
+    // 1) Eski opening hareketini silme; ters kayıt ile audit ve stok dengesini koru
+    if (oldQty > 0) {
+      await client.query(`
+        INSERT INTO stock_movements (material_id, movement_type, quantity, unit_cost,
+          reference_type, reference_id, location, notes, created_at)
+        VALUES ($1, 'opening_in', $2, $3, 'OPENING_CORRECTION', $4, $5, $6, NOW())`,
+        [line.material_id, -oldQty, oldCost, s.id, loc,
+         `Açılış düzeltme ters kaydı (İptal edilen: ${oldQty} @ ${oldCost} TL)`]
+      )
+    }
+
+    // 2) Yeni kayıt ile düzeltilmiş açılış hareketini oluştur
+    if (newQty > 0) {
+      await client.query(`
+        INSERT INTO stock_movements (material_id, movement_type, quantity, unit_cost,
+          reference_type, reference_id, location, notes, created_at)
+        VALUES ($1, 'opening_in', $2, $3, 'OPENING_CORRECTION', $4, $5, $6, NOW())`,
+        [line.material_id, newQty, newCost, s.id, loc,
+         notes ? `Açılış düzeltme: ${notes}` : 'Açılış düzeltme sayımı']
+      )
+    }
+
+    // 3) Material tablosunu güncelle (yalnız opening hareketi olduğundan geriye dönük avg_cost karmaşası olmadan temiz güncellenir)
+    await client.query(`
+      UPDATE materials
+      SET current_stock = current_stock - $1::numeric + $2::numeric,
+          avg_cost = CASE WHEN $2::numeric > 0 THEN $3::numeric ELSE avg_cost END
+      WHERE id = $4`,
+      [oldQty, newQty, newCost, line.material_id]
+    )
+
+    // 4) opening_lines tablosunu güncelle (mevcut şemada var olan kolonlar kullanılır)
+    await client.query(`
+      UPDATE opening_lines
+      SET counted_qty = $1, unit_cost = $2, location = $3,
+          notes = $4, updated_at = NOW()
+      WHERE id = $5`,
+      [newQty, newCost, loc, noteText, line.id]
+    )
+
+    await client.query('COMMIT')
+    invalidateOpeningCache()
+    res.json({ ok: true, line_id: line.id })
+  } catch (e) {
+    await client.query('ROLLBACK')
+    next(e)
+  } finally {
+    client.release()
+  }
+})
+
 // counted_qty: null gönderilirse "sayılmadı"ya döner, 0 gerçek sıfırdır
 router.put('/materials/:lineId', async (req, res, next) => {
   try {
@@ -851,7 +977,7 @@ router.post('/lock', async (req, res, next) => {
       const qty = parseFloat(l.counted_qty)
       if (qty > 0) {
         const { rows: existingMovements } = await client.query(
-          `SELECT id FROM stock_movements WHERE reference_type IN ('OPENING', 'OPENING_COMPLETION') AND reference_id = $1 AND material_id = $2`,
+          `SELECT id FROM stock_movements WHERE reference_type IN ('OPENING', 'OPENING_COMPLETION', 'OPENING_CORRECTION') AND reference_id = $1 AND material_id = $2`,
           [session.id, l.material_id]
         )
         if (!existingMovements.length) {

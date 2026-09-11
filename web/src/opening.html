@@ -302,20 +302,22 @@ async function openSection(key) {
 async function secMaterials() {
   const rows = await api('/opening/materials')
   const isOpen = state.state === 'open'
+  const isCompleted = state.state === 'completed' || state.is_locked
   $('view').innerHTML = `${back}
     <div class="op-note">
       Excel'de miktarın 0 olması <strong>"stok yok" demek değildir</strong> — bu kalemler fiziksel
       sayım bekliyor. Miktar alanı <strong>boş bırakılırsa "sayılmadı"</strong> sayılır ve açılış
-      stok hareketi oluşmaz. Gerçekten sıfırsa <strong>0</strong> yazın.
-      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Önceden sayımı tamamlanmış malzemeler kilitlidir. Henüz sayılmamış kalemleri buradan sayarak sisteme ekleyebilirsiniz.' : ''}
+      stok hareketi oluşmaz. Gerçekten sıfırsa <strong>0</strong> yazın.<br/>
+      Sayım miktarı, birim maliyet ve konum bilgisi <strong>Kaydet</strong> butonu ile birlikte kaydedilir.
+      ${isOpen ? '<br/><strong>Operasyonel Mod:</strong> Önceden sayımı tamamlanmış malzemeler kilitlidir. Hatalı girilen ve sonrasında hareket görmemiş açılış sayımlarını <strong>Düzelt</strong> butonu ile güvenli ve audit izi korunacak şekilde düzeltebilirsiniz.' : ''}
     </div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>SKU</th><th>Malzeme</th><th>Birim</th><th>Konum</th>
         <th style="text-align:right">Sayım</th><th style="text-align:right">Birim maliyet</th>
-        <th style="text-align:right">Toplam değer</th><th>Durum</th></tr></thead>
+        <th style="text-align:right">Toplam değer</th><th>Durum</th><th style="text-align:center">İşlem</th></tr></thead>
       <tbody>${rows.map(r => {
         const isCounted = r.counted_at !== null
-        const isLocked = isOpen && isCounted
+        const isLocked = isCompleted || (isOpen && isCounted)
         return `
         <tr data-id="${r.id}" data-counted="${isCounted ? '1' : '0'}">
           <td><code>${r.sku}</code></td>
@@ -330,30 +332,176 @@ async function secMaterials() {
           <td>${isCounted
             ? (isOpen ? '<span class="chip chip-green">Sayıldı (Kilitli)</span>' : '<span class="chip chip-green">Sayıldı</span>')
             : '<span class="chip chip-yellow">Sayılmadı</span>'}</td>
+          <td style="white-space:nowrap;text-align:center">
+            ${isCompleted ? '—' : (
+              isOpen && isCounted
+                ? `<button class="btn btn-sm btn-secondary act-correct" data-id="${r.id}">Düzelt</button>`
+                : `<button class="btn btn-sm btn-primary act-save" data-id="${r.id}">${isCounted ? 'Güncelle' : 'Kaydet'}</button>`
+            )}
+          </td>
         </tr>`}).join('')}</tbody>
     </table></div></div>`
 
-  document.querySelectorAll('tr[data-id]').forEach(tr => {
-    if (tr.dataset.counted === '1' && isOpen) return
-    const save = async () => {
-      const qty = numOrNull(tr.querySelector('.f-qty').value)
-      const cost = numOrNull(tr.querySelector('.f-cost').value)
-      // CHK-A07: miktar > 0 ise birim maliyet zorunlu
-      if (qty !== null && qty > 0 && cost === null) {
-        toast('Miktar > 0 olduğunda birim maliyet zorunludur', 'error'); return
+  // Miktar + birim maliyet + konum ancak açık Kaydet butonuyla kaydedilir (onchange tamamen kaldırıldı)
+  document.querySelectorAll('.act-save').forEach(btn => {
+    btn.onclick = async () => {
+      const tr = btn.closest('tr')
+      const qtyInput = tr.querySelector('.f-qty')
+      const costInput = tr.querySelector('.f-cost')
+      const locInput = tr.querySelector('.f-loc')
+
+      const qtyVal = qtyInput.value.trim()
+      const costVal = costInput.value.trim()
+      const locVal = locInput.value.trim()
+
+      if (qtyVal === '') {
+        if (isOpen) {
+          toast('Sayım miktarı girilmelidir (yoksa 0 girin)', 'error')
+          qtyInput.focus()
+          return
+        }
+        try {
+          btn.disabled = true
+          await api(`/opening/materials/${btn.dataset.id}`, {
+            method: 'PUT',
+            body: { counted_qty: null, unit_cost: null, location: locVal || null }
+          })
+          toast('Malzeme sayılmadı durumuna getirildi')
+          secMaterials()
+        } catch (e) {
+          toast(e.message, 'error')
+          btn.disabled = false
+        }
+        return
       }
-      const body = { counted_qty: qty, unit_cost: cost, location: tr.querySelector('.f-loc').value }
-      if (isOpen) {
-        if (qty === null) return
-        await api(`/opening/materials/${tr.dataset.id}/complete`, { method: 'POST', body })
-        toast('Malzeme açılış sayımı tamamlandı')
-      } else {
-        await api(`/opening/materials/${tr.dataset.id}`, { method: 'PUT', body })
+
+      const qty = parseFloat(qtyVal)
+      if (isNaN(qty) || qty < 0) {
+        toast('Geçerli bir sayım miktarı girin', 'error')
+        qtyInput.focus()
+        return
       }
-      secMaterials()
+
+      let cost = null
+      if (costVal !== '') {
+        cost = parseFloat(costVal)
+        if (isNaN(cost) || cost < 0) {
+          toast('Geçerli bir birim maliyet girin', 'error')
+          costInput.focus()
+          return
+        }
+      }
+
+      if (qty > 0 && cost === null) {
+        toast('Miktar > 0 olduğunda birim maliyet zorunludur', 'error')
+        costInput.focus()
+        return
+      }
+
+      const body = {
+        counted_qty: qty,
+        unit_cost: cost,
+        location: locVal || 'ATOLYE'
+      }
+
+      try {
+        btn.disabled = true
+        if (isOpen) {
+          await api(`/opening/materials/${btn.dataset.id}/complete`, { method: 'POST', body })
+          toast('Malzeme açılış sayımı kaydedildi')
+        } else {
+          await api(`/opening/materials/${btn.dataset.id}`, { method: 'PUT', body })
+          toast('Kaydedildi')
+        }
+        secMaterials()
+      } catch (e) {
+        toast(e.message, 'error')
+        btn.disabled = false
+      }
     }
-    tr.querySelectorAll('.f-qty,.f-cost,.f-loc').forEach(i => i.onchange = save)
   })
+
+  document.querySelectorAll('.act-correct').forEach(btn => {
+    btn.onclick = () => {
+      const r = rows.find(x => x.id === parseInt(btn.dataset.id, 10))
+      if (r) materialCorrectModal(r)
+    }
+  })
+}
+
+function materialCorrectModal(r) {
+  openModal(`
+    <div class="modal-header">
+      <h2>Açılış Sayımı Düzelt — <code>${r.sku}</code></h2>
+      <button class="modal-close" onclick="window.__close()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="op-note" style="margin-bottom:14px">
+        <strong>${r.name}</strong> (${r.unit})<br/>
+        Mevcut kayıt: <strong>${r.counted_qty} ${r.unit}</strong> × <strong>${money(r.unit_cost)}</strong> (${r.location || 'ATOLYE'})<br/>
+        <span style="font-size:.8rem;color:var(--text-secondary);display:inline-block;margin-top:4px">
+          Bu işlem eski açılış hareketini silmez. Ters kayıt ve düzeltme kaydı oluşturarak denetim izini (audit trail) korur.
+        </span>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Doğru Sayım Miktarı (${r.unit}) *</label>
+          <input id="c-qty" class="form-control" type="number" step="0.0001" min="0" value="${r.counted_qty ?? ''}" />
+        </div>
+        <div class="form-group">
+          <label>Doğru Birim Maliyet (TL) *</label>
+          <input id="c-cost" class="form-control" type="number" step="0.01" min="0" value="${r.unit_cost ?? ''}" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Konum</label>
+          <input id="c-loc" class="form-control" value="${r.location || 'ATOLYE'}" />
+        </div>
+        <div class="form-group">
+          <label>Düzeltme Sebebi / Not</label>
+          <input id="c-notes" class="form-control" placeholder="Örn: Açılış sayımında miktar ve maliyet ters girilmiş" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="window.__close()">İptal</button>
+      <button class="btn btn-primary" id="c-submit">Düzeltmeyi Kaydet</button>
+    </div>
+  `)
+
+  $('c-submit').onclick = async () => {
+    const qtyVal = $('c-qty').value.trim()
+    const costVal = $('c-cost').value.trim()
+    const locVal = $('c-loc').value.trim()
+    const notesVal = $('c-notes').value.trim()
+
+    if (qtyVal === '') return toast('Sayım miktarı girilmelidir', 'error')
+    const qty = parseFloat(qtyVal)
+    if (isNaN(qty) || qty < 0) return toast('Geçerli bir miktar girin', 'error')
+    if (qty > 0 && costVal === '') return toast('Miktar > 0 olduğunda birim maliyet zorunludur', 'error')
+    const cost = qty > 0 ? parseFloat(costVal) : (costVal !== '' ? parseFloat(costVal) : 0)
+    if (isNaN(cost) || cost < 0) return toast('Geçerli bir maliyet girin', 'error')
+
+    try {
+      $('c-submit').disabled = true
+      await api(`/opening/materials/${r.id}/correct`, {
+        method: 'POST',
+        body: {
+          counted_qty: qty,
+          unit_cost: cost,
+          location: locVal || 'ATOLYE',
+          notes: notesVal
+        }
+      })
+      closeModal()
+      toast('Açılış sayımı düzeltildi')
+      secMaterials()
+    } catch (e) {
+      toast(e.message, 'error')
+      $('c-submit').disabled = false
+    }
+  }
 }
 
 // --- 2. Hazır ürün ----------------------------------------------------------
@@ -515,16 +663,7 @@ async function secReceivables() {
         </tr>`}).join('')}</tbody>
     </table></div></div>`
 
-  document.querySelectorAll('tr[data-id]').forEach(tr => {
-    if (tr.dataset.locked === '1') return
-    const amtInput = tr.querySelector('.f-amt')
-    if (amtInput) {
-      amtInput.onchange = async e => {
-        await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: { amount: numOrNull(e.target.value) } })
-        secReceivables()
-      }
-    }
-  })
+  // Kaydetme işlemi ancak butonlara (Hâlâ alacak / Kapandı) tıklanarak yapılır
   document.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
     const tr = b.closest('tr')
     if (tr && tr.dataset.locked === '1') return
@@ -720,7 +859,7 @@ function assetForm() {
 
 function lineTable(rows, firstCell, amountLabel, isRowLockedFn = null) {
   return `<div class="card"><div class="table-wrap"><table>
-    <thead><tr><th>Kalem</th><th style="text-align:right">${amountLabel}</th><th>Not</th><th>Durum</th></tr></thead>
+    <thead><tr><th>Kalem</th><th style="text-align:right">${amountLabel}</th><th>Not</th><th>Durum</th><th style="text-align:center">İşlem</th></tr></thead>
     <tbody>${rows.map(r => {
       const isLocked = typeof isRowLockedFn === 'function' ? isRowLockedFn(r) : !!isRowLockedFn
       const isVerified = r.amount !== null
@@ -731,6 +870,9 @@ function lineTable(rows, firstCell, amountLabel, isRowLockedFn = null) {
           placeholder="girilmedi" value="${r.amount ?? ''}" ${isLocked ? 'disabled' : ''} /></td>
         <td><input class="form-control f-notes" value="${r.notes || ''}" ${isLocked ? 'disabled' : ''} /></td>
         <td>${isVerified ? '<span class="chip chip-green">Doğrulandı</span>' : '<span class="chip chip-yellow">Bekliyor</span>'}</td>
+        <td style="white-space:nowrap;text-align:center">
+          ${isLocked ? '—' : `<button class="btn btn-sm btn-primary act-line-save">Kaydet</button>`}
+        </td>
       </tr>`}).join('')}</tbody>
   </table></div></div>`
 }
@@ -738,14 +880,22 @@ function lineTable(rows, firstCell, amountLabel, isRowLockedFn = null) {
 function wireLines(reload) {
   document.querySelectorAll('tr[data-id]').forEach(tr => {
     if (tr.dataset.locked === '1') return
-    const save = async () => {
-      await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: {
-        amount: numOrNull(tr.querySelector('.f-amt').value),
-        notes: tr.querySelector('.f-notes')?.value ?? null } })
-      toast('Kaydedildi')
-      reload()
+    const saveBtn = tr.querySelector('.act-line-save')
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        try {
+          saveBtn.disabled = true
+          await api(`/opening/lines/${tr.dataset.id}`, { method: 'PUT', body: {
+            amount: numOrNull(tr.querySelector('.f-amt').value),
+            notes: tr.querySelector('.f-notes')?.value ?? null } })
+          toast('Kaydedildi')
+          reload()
+        } catch (e) {
+          toast(e.message, 'error')
+          saveBtn.disabled = false
+        }
+      }
     }
-    tr.querySelectorAll('.f-amt,.f-notes').forEach(i => i.onchange = save)
   })
 }
 
