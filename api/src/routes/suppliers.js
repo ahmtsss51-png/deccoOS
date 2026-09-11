@@ -114,6 +114,56 @@ router.get('/:id/purchases', async (req, res, next) => {
   } catch (e) { next(e) }
 })
 
+router.get('/:id/historical-purchases', async (req, res, next) => {
+  try {
+    const { rows: sup } = await query('SELECT id, supplier_type FROM suppliers WHERE id=$1', [req.params.id])
+    if (!sup[0] || sup[0].supplier_type !== 'material_supplier') {
+      return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
+    }
+    const { rows } = await query(
+      `SELECT * FROM (
+        SELECT shp.id, shp.purchase_date::timestamptz AS date, shp.amount,
+               '—' AS payment_method,
+               shp.external_reference,
+               shp.description,
+               shp.note,
+               'Tarihsel / Ödenmiş' AS status,
+               'archive' AS source
+        FROM supplier_historical_purchases shp
+        WHERE shp.supplier_id = $1
+        UNION ALL
+        SELECT t.id, t.transaction_date AS date, ABS(t.amount) AS amount,
+               a.name AS payment_method,
+               NULL::varchar AS external_reference,
+               t.description,
+               NULL::text AS note,
+               'Tarihsel / Ödenmiş' AS status,
+               'transaction' AS source
+        FROM transactions t
+        JOIN accounts a ON t.account_id = a.id
+        WHERE t.transaction_type = 'expense'
+          AND t.reference_type = 'supplier'
+          AND t.reference_id = $1
+          AND t.description ILIKE '%Deri & Sarf Malzemesi%'
+      ) combined
+      ORDER BY date DESC, id DESC`,
+      [req.params.id])
+
+    const byYear = {}
+    let total = 0
+    rows.forEach(r => {
+      const yr = new Date(r.date).getFullYear()
+      const amt = parseFloat(r.amount || 0)
+      total += amt
+      byYear[yr] = (byYear[yr] || 0) + amt
+    })
+
+    res.json({ items: rows, total, by_year: byYear })
+  } catch (e) { next(e) }
+})
+
+
+
 router.get('/:id/ledger', async (req, res, next) => {
   try {
     const { rows: sup } = await query('SELECT id, supplier_type FROM suppliers WHERE id=$1', [req.params.id])

@@ -486,3 +486,182 @@ BEGIN
       CHECK ((payment_type = 'direct_from_customer' AND account_id IS NULL) OR (payment_type <> 'direct_from_customer' AND account_id IS NOT NULL));
   END IF;
 END $$;
+
+-- Salt okunur tarihsel tedarikçi alım arşivi (canlı stok, cari ve kasa/banka etkilemez)
+CREATE TABLE IF NOT EXISTS supplier_historical_purchases (
+  id SERIAL PRIMARY KEY,
+  supplier_id INT NOT NULL REFERENCES suppliers(id),
+  purchase_date DATE NOT NULL,
+  amount NUMERIC(14,2) NOT NULL,
+  external_reference VARCHAR(100),
+  description TEXT,
+  note TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS shp_supplier_idx ON supplier_historical_purchases (supplier_id, purchase_date DESC);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'shp_supplier_extref_uniq'
+  ) THEN
+    ALTER TABLE supplier_historical_purchases
+      ADD CONSTRAINT shp_supplier_extref_uniq UNIQUE (supplier_id, external_reference);
+  END IF;
+END $$;
+
+-- 2025 ALİ KARAYAZI tarihsel alımlar seed (idempotent)
+DO $$
+DECLARE
+  v_supplier_id INT;
+BEGIN
+  SELECT id INTO v_supplier_id FROM suppliers WHERE name ILIKE '%ALİ KARAYAZI%' LIMIT 1;
+  IF v_supplier_id IS NOT NULL THEN
+    INSERT INTO supplier_historical_purchases (supplier_id, purchase_date, amount, external_reference, description, note)
+    VALUES
+      (v_supplier_id, '2025-01-25', 4420.00, '#15014', 'Deri & Sarf Malzemesi', '2025 Tarihsel Alım'),
+      (v_supplier_id, '2025-02-05', 3240.00, '#15081', 'Deri & Sarf Malzemesi', '2025 Tarihsel Alım'),
+      (v_supplier_id, '2025-03-06', 600.00, '#15321', 'Deri & Sarf Malzemesi', '2025 Tarihsel Alım')
+    ON CONFLICT (supplier_id, external_reference) DO NOTHING;
+  END IF;
+END $$;
+
+-- CHK-H01: 22.07.2026 Paketleme hepsiburada gider tutarı düzeltmesi (1.503,50 TL -> 1.187,20 TL)
+UPDATE transactions
+SET amount = -1187.20,
+    description = CASE
+      WHEN description LIKE '%[Düzeltme%' THEN description
+      ELSE description || ' [Düzeltme: 1.503,50 TL -> 1.187,20 TL (gerçek sipariş toplamı)]'
+    END
+WHERE id = 49 AND amount = -1503.50;
+
+-- Ambalaj tedarikçileri (material_supplier)
+INSERT INTO suppliers (name, supplier_type)
+SELECT 'Kutufix', 'material_supplier'
+WHERE NOT EXISTS (SELECT 1 FROM suppliers WHERE name = 'Kutufix');
+
+INSERT INTO suppliers (name, supplier_type)
+SELECT 'Packanya', 'material_supplier'
+WHERE NOT EXISTS (SELECT 1 FROM suppliers WHERE name = 'Packanya');
+
+INSERT INTO suppliers (name, supplier_type)
+SELECT 'Doğal Ambalaj', 'material_supplier'
+WHERE NOT EXISTS (SELECT 1 FROM suppliers WHERE name = 'Doğal Ambalaj');
+
+-- Ambalaj tedarikçileri salt okunur tarihsel alımlar (idempotent)
+DO $$
+DECLARE
+  v_kutufix_id INT;
+  v_packanya_id INT;
+  v_dogal_id INT;
+BEGIN
+  SELECT id INTO v_kutufix_id FROM suppliers WHERE name = 'Kutufix' LIMIT 1;
+  IF v_kutufix_id IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM supplier_historical_purchases
+      WHERE supplier_id = v_kutufix_id AND purchase_date = '2025-04-14' AND amount = 629.00
+    ) THEN
+      INSERT INTO supplier_historical_purchases (supplier_id, purchase_date, amount, external_reference, description, note)
+      VALUES (v_kutufix_id, '2025-04-14', 629.00, '#1665', 'Karton Kutu 15×11×5 cm', 'Tarihsel Alım');
+    END IF;
+  END IF;
+
+  SELECT id INTO v_packanya_id FROM suppliers WHERE name = 'Packanya' LIMIT 1;
+  IF v_packanya_id IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM supplier_historical_purchases
+      WHERE supplier_id = v_packanya_id AND purchase_date = '2026-07-24' AND amount = 525.12
+    ) THEN
+      INSERT INTO supplier_historical_purchases (supplier_id, purchase_date, amount, external_reference, description, note)
+      VALUES (v_packanya_id, '2026-07-24', 525.12, NULL, 'Kilitli Kutu 26×19×5 cm', 'Tarihsel Alım');
+    END IF;
+  END IF;
+
+  SELECT id INTO v_dogal_id FROM suppliers WHERE name = 'Doğal Ambalaj' LIMIT 1;
+  IF v_dogal_id IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM supplier_historical_purchases
+      WHERE supplier_id = v_dogal_id AND purchase_date = '2026-07-31' AND amount = 662.08
+    ) THEN
+      INSERT INTO supplier_historical_purchases (supplier_id, purchase_date, amount, external_reference, description, note)
+      VALUES (v_dogal_id, '2026-07-31', 662.08, NULL, 'Honeycomb Kraft Ambalaj 40 cm × 100 m', 'Tarihsel Alım');
+    END IF;
+  END IF;
+END $$;
+
+-- Ambalaj malzemeleri (stok miktarı 0, reorder_level NULL)
+INSERT INTO materials (sku, name, family, material_type, unit, current_stock, reserved_stock, avg_cost, reorder_level)
+SELECT 'PKG-KTU-26195', 'Kilitli Kutu 26×19×5 cm', 'Kutu', 'packaging', 'adet', 0, 0, 0, NULL
+WHERE NOT EXISTS (SELECT 1 FROM materials WHERE name = 'Kilitli Kutu 26×19×5 cm' OR sku = 'PKG-KTU-26195');
+
+INSERT INTO materials (sku, name, family, material_type, unit, current_stock, reserved_stock, avg_cost, reorder_level)
+SELECT 'PKG-HNY-40CM', 'Honeycomb Kraft Ambalaj 40 cm', 'Kraft', 'packaging', 'metre', 0, 0, 0, NULL
+WHERE NOT EXISTS (SELECT 1 FROM materials WHERE name = 'Honeycomb Kraft Ambalaj 40 cm' OR sku = 'PKG-HNY-40CM');
+
+-- Kumaşçı tarihsel alım (idempotent, external_reference = NULL)
+DO $$
+DECLARE
+  v_sup_id INT;
+BEGIN
+  SELECT id INTO v_sup_id FROM suppliers WHERE name ILIKE '%Kumaşçı%' LIMIT 1;
+  IF v_sup_id IS NOT NULL THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM supplier_historical_purchases
+      WHERE supplier_id = v_sup_id
+        AND purchase_date = '2026-08-20'
+        AND amount = 860.22
+        AND description = 'Parafinli Kanvas Kumaş - 1 metre uzunluk x 150 cm en (1,50 m²)'
+    ) THEN
+      INSERT INTO supplier_historical_purchases (supplier_id, purchase_date, amount, external_reference, description, note)
+      VALUES (v_sup_id, '2026-08-20', 860.22, NULL, 'Parafinli Kanvas Kumaş - 1 metre uzunluk x 150 cm en (1,50 m²)', '25.08.2026 tarihinde teslim alındı');
+    END IF;
+  END IF;
+END $$;
+
+-- Parafinli Kanvas Kumaş malzeme kartı ve fiziksel açılış stoku (idempotent)
+DO $$
+DECLARE
+  v_mat_id INT;
+  v_session_id INT;
+  v_line_id INT;
+BEGIN
+  -- Malzeme kartı
+  SELECT id INTO v_mat_id FROM materials WHERE sku = 'KNV-PRF-KKH' OR name = 'Parafinli Kanvas Kumaş — Koyu Kahve' LIMIT 1;
+  IF v_mat_id IS NULL THEN
+    INSERT INTO materials (sku, name, family, color, material_type, unit, current_stock, reserved_stock, avg_cost, reorder_level)
+    VALUES ('KNV-PRF-KKH', 'Parafinli Kanvas Kumaş — Koyu Kahve', 'Kanvas', 'Koyu Kahve', 'textile', 'm²', 1.0000, 0, 573.4800, NULL)
+    RETURNING id INTO v_mat_id;
+  ELSE
+    UPDATE materials
+    SET current_stock = 1.0000, avg_cost = 573.4800, color = 'Koyu Kahve'
+    WHERE id = v_mat_id;
+  END IF;
+
+  -- Açılış sayımı ve başlangıç stoku
+  SELECT id INTO v_session_id FROM opening_sessions WHERE status = 'open' ORDER BY id DESC LIMIT 1;
+  IF v_session_id IS NOT NULL THEN
+    SELECT id INTO v_line_id FROM opening_lines
+    WHERE session_id = v_session_id AND section = 'material' AND ref_key = v_mat_id::text LIMIT 1;
+
+    IF v_line_id IS NULL THEN
+      INSERT INTO opening_lines (session_id, section, ref_key, material_id, counted_qty, unit_cost, amount, location, status, notes, counted_at, updated_at)
+      VALUES (v_session_id, 'material', v_mat_id::text, v_mat_id, 1.0000, 573.4800, 573.48, 'ATOLYE', 'counted',
+              'Fiziksel açılış sayımı: 1,00 m² (Alış: 1,50 m² @ 860,22 TL)', NOW(), NOW())
+      RETURNING id INTO v_line_id;
+    ELSE
+      UPDATE opening_lines
+      SET counted_qty = 1.0000, unit_cost = 573.4800, amount = 573.48, status = 'counted',
+          notes = 'Fiziksel açılış sayımı: 1,00 m² (Alış: 1,50 m² @ 860,22 TL)', counted_at = COALESCE(counted_at, NOW()), updated_at = NOW()
+      WHERE id = v_line_id;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM stock_movements
+      WHERE material_id = v_mat_id AND movement_type = 'opening_in' AND reference_type = 'OPENING_COMPLETION' AND reference_id = v_session_id
+    ) THEN
+      INSERT INTO stock_movements (material_id, movement_type, quantity, unit_cost, reference_type, reference_id, location, notes, created_at)
+      VALUES (v_mat_id, 'opening_in', 1.0000, 573.4800, 'OPENING_COMPLETION', v_session_id, 'ATOLYE',
+              'Açılış tamamlama: Fiziksel açılış sayımı: 1,00 m² (Alış: 1,50 m² @ 860,22 TL)', NOW());
+    END IF;
+  END IF;
+END $$;

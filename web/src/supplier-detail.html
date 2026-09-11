@@ -34,18 +34,19 @@ const id = new URLSearchParams(location.search).get('id')
 const $ = i => document.getElementById(i)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
 
-let s = null, purchases = [], payments = [], returns_ = [], ledger = [], accounts = [], openingLocked = true
+let s = null, purchases = [], payments = [], returns_ = [], ledger = [], accounts = [], openingLocked = true, historical = { items: [], total: 0 }
 
 async function load() {
   if (!id) { $('view').innerHTML = '<div class="card" style="padding:32px">Tedarikçi seçilmedi</div>'; return }
   try {
     const [sup, accts, summary] = await Promise.all([api(`/suppliers/${id}`), api('/finance/accounts'), api('/finance/summary')])
     s = sup; accounts = accts; openingLocked = summary.opening_locked ?? true
-    ;[purchases, payments, returns_, ledger] = await Promise.all([
+    ;[purchases, payments, returns_, ledger, historical] = await Promise.all([
       api(`/suppliers/${id}/purchases`),
       api('/finance/transactions').then(ts => ts.filter(t => t.reference_type === 'supplier_payment')),
       Promise.resolve([]),
-      api(`/suppliers/${id}/ledger`)
+      api(`/suppliers/${id}/ledger`),
+      api(`/suppliers/${id}/historical-purchases`).catch(() => ({ items: [], total: 0 }))
     ])
     render()
   } catch (e) { $('view').innerHTML = `<div class="card" style="padding:32px">${esc(e.message)}</div>` }
@@ -105,6 +106,7 @@ function render() {
     <div class="filter-tabs" id="tabs">
       <button class="filter-tab active" data-tab="ledger">Cari Hareketler</button>
       <button class="filter-tab" data-tab="purchases">Alımlar (${purchases.length})</button>
+      <button class="filter-tab" data-tab="historical">Tarihsel Alımlar (${historical.items.length})</button>
     </div>
 
     <div class="panel active" id="panel-ledger">
@@ -147,6 +149,44 @@ function render() {
           : '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">📦</div><div>Alım kaydı yok</div></div></td></tr>'}
         </tbody>
       </table></div></div>
+    </div>
+
+    <div class="panel" id="panel-historical">
+      <div class="card">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;background:var(--surface-2);border-radius:8px 8px 0 0">
+          <div style="font-size:0.83rem;color:var(--text-secondary)">
+            ℹ️ Salt okunur tarihsel arşivdir. Cari borç, stok ve kasa/banka bakiyesini etkilemez.
+          </div>
+          <div style="display:flex;gap:16px;align-items:center;font-size:0.88rem;flex-wrap:wrap">
+            ${historical.by_year?.['2025'] ? `<span>2025: <b class="td-mono">${money(historical.by_year['2025'])}</b></span>` : ''}
+            ${historical.by_year?.['2026'] ? `<span>2026: <b class="td-mono">${money(historical.by_year['2026'])}</b></span>` : ''}
+            <span style="padding-left:8px;border-left:1px solid var(--border)">Toplam: <b class="td-mono" style="color:var(--text)">${money(historical.total)}</b></span>
+          </div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead>
+            <tr>
+              <th>Tarih</th>
+              <th>Belge No</th>
+              <th>Açıklama</th>
+              <th>Ödeme Yöntemi</th>
+              <th style="text-align:right">Tutar</th>
+              <th style="text-align:center">Durum</th>
+            </tr>
+          </thead>
+          <tbody>${historical.items.length ? historical.items.map(h => `
+            <tr>
+              <td class="td-muted">${fmtDate(h.date)}</td>
+              <td>${h.external_reference ? `<span class="chip chip-gray">${esc(h.external_reference)}</span>` : '—'}</td>
+              <td>${esc(h.description)}${h.note ? `<span style="font-size:0.75rem;color:var(--text-secondary);margin-left:6px">(${esc(h.note)})</span>` : ''}</td>
+              <td><span class="chip chip-gray">${esc(h.payment_method)}</span></td>
+              <td class="td-mono" style="text-align:right">${money(h.amount)}</td>
+              <td style="text-align:center"><span class="chip chip-blue">${esc(h.status || 'Tarihsel / Ödenmiş')}</span></td>
+            </tr>`).join('')
+            : '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📁</div><div>Tarihsel alım kaydı yok</div></div></td></tr>'}
+          </tbody>
+        </table></div>
+      </div>
     </div>`
 
   $('tabs').addEventListener('click', e => {
@@ -371,11 +411,18 @@ window.saveDiscount = async () => {
   } catch (e) { toast(e.message, 'error') }
 }
 
-function editForm() {
+window.editForm = () => {
+  const debt = parseFloat(s.total_debt || 0)
   openModal(`
     <div class="modal-header"><h3>Tedarikçi Düzenle</h3>
       <button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
+      ${debt > 0 ? `
+        <div style="background:var(--surface-2);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:0.85rem">
+          Cari Borç: <b class="money-neg">${money(debt)}</b>
+          <span style="color:var(--text-muted);margin-left:6px">(Cari borç bu formdan değiştirilemez)</span>
+        </div>
+      ` : ''}
       <div class="form-group"><label class="form-label">Tedarikçi Adı *</label>
         <input id="e-name" class="form-control" value="${esc(s.name)}" /></div>
       <div class="form-row">
@@ -406,7 +453,9 @@ window.saveEdit = async () => {
   try {
     await api(`/suppliers/${id}`, { method: 'PUT', body: {
       name, phone: g('e-phone'), email: g('e-email'), tax_no: g('e-tax'),
-      address: g('e-address'), notes: g('e-notes') } })
+      address: g('e-address'), notes: g('e-notes'),
+      supplier_type: s.supplier_type || 'material_supplier'
+    } })
     toast('Tedarikçi güncellendi'); closeModal(); load()
   } catch (e) { toast(e.message, 'error') }
 }

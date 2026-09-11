@@ -98,8 +98,8 @@ function render(data) {
     <td class="td-mono ${!openingLocked ? '' : parseFloat(s.total_debt) > 0 ? 'money-neg' : ''}">${!openingLocked ? '<span style="color:var(--text-secondary)">Doğrulanmadı</span>' : parseFloat(s.total_debt) > 0 ? money(s.total_debt) : '—'}</td>
     <td class="td-muted">${fmtDate(s.last_purchase_at)}</td>
     <td style="white-space:nowrap">
-      <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();location.href='/supplier-detail.html?id=${s.id}'">Detay</button>
-      <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();openSupplierForm(${s.id})">Düzenle</button>
+      <button class="btn btn-secondary btn-sm" onclick="event.preventDefault();event.stopPropagation();location.href='/supplier-detail.html?id=${s.id}'">Detay</button>
+      <button class="btn btn-secondary btn-sm" onclick="event.preventDefault();event.stopPropagation();openSupplierForm(${s.id})">Düzenle</button>
     </td>
   </tr>`).join('')
 }
@@ -150,37 +150,82 @@ window.openSupplierDetail = async (id) => {
 
 window.openSupplierForm = async (id = null) => {
   let s = {}
-  if (id) s = allSuppliers.find(x => x.id === id) || {}
+  if (id) {
+    s = allSuppliers.find(x => String(x.id) === String(id)) || {}
+    if (!s.name) {
+      try { s = await api(`/suppliers/${id}`) } catch {}
+    }
+  }
+  const isEdit = !!id
+
   openModal(`
-    <div class="modal-header"><h3>${id ? 'Tedarikçi Düzenle' : 'Yeni Tedarikçi'}</h3><button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="modal-header">
+      <h3>${isEdit ? 'Tedarikçi Düzenle' : 'Yeni Tedarikçi'}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
     <div class="modal-body">
-      <div class="form-group"><label class="form-label">Tedarikçi Adı *</label>
-        <input id="s-name" class="form-control" value="${s.name||''}" placeholder="Deri Pazarı A.Ş." /></div>
-      <div class="form-group"><label class="form-label">Telefon</label>
-        <input id="s-phone" class="form-control" value="${s.phone||''}" placeholder="0212 XXX XX XX" /></div>
-      <div class="form-group"><label class="form-label">Notlar</label>
-        <textarea id="s-notes" class="form-control" rows="2">${s.notes||''}</textarea></div>
+      ${isEdit && parseFloat(s.total_debt || 0) > 0 ? `
+        <div style="background:var(--surface-2);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:0.85rem">
+          Cari Borç: <b class="money-neg">${money(s.total_debt)}</b>
+          <span style="color:var(--text-muted);margin-left:6px">(Cari borç ve açılış bakiyesi bu formdan değiştirilemez)</span>
+        </div>
+      ` : ''}
+      <div class="form-group">
+        <label class="form-label">Tedarikçi Adı *</label>
+        <input id="s-name" class="form-control" value="${s.name || ''}" placeholder="Deri Pazarı A.Ş." />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Telefon</label>
+          <input id="s-phone" class="form-control" value="${s.phone || ''}" placeholder="0212 XXX XX XX" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">E-posta</label>
+          <input id="s-email" class="form-control" type="email" value="${s.email || ''}" placeholder="info@tedarikci.com" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Vergi No</label>
+          <input id="s-tax" class="form-control" value="${s.tax_no || ''}" placeholder="Vergi No / Daire" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Adres</label>
+          <input id="s-address" class="form-control" value="${s.address || ''}" placeholder="Adres..." />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notlar</label>
+        <textarea id="s-notes" class="form-control" rows="2" placeholder="Tedarikçi hakkında notlar...">${s.notes || ''}</textarea>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">İptal</button>
-      <button class="btn btn-primary" onclick="saveSupplier(${id||'null'})">Kaydet</button>
+      <button class="btn btn-primary" onclick="saveSupplier(${id ? id : 'null'})">Kaydet</button>
     </div>
   `)
 }
 
 window.saveSupplier = async (id) => {
+  const name = document.getElementById('s-name').value.trim()
+  if (!name) { toast('Ad zorunludur', 'error'); return }
+
   const body = {
-    name: document.getElementById('s-name').value.trim(),
-    phone: document.getElementById('s-phone').value || null,
-    notes: document.getElementById('s-notes').value || null,
+    name,
+    phone: document.getElementById('s-phone')?.value.trim() || null,
+    email: document.getElementById('s-email')?.value.trim() || null,
+    tax_no: document.getElementById('s-tax')?.value.trim() || null,
+    address: document.getElementById('s-address')?.value.trim() || null,
+    notes: document.getElementById('s-notes')?.value.trim() || null,
     supplier_type: 'material_supplier',
   }
-  if (!body.name) { toast('Ad zorunludur', 'error'); return }
+
   try {
     if (id) await api(`/suppliers/${id}`, { method: 'PUT', body })
     else await api('/suppliers', { method: 'POST', body })
     toast(id ? 'Tedarikçi güncellendi' : 'Tedarikçi eklendi')
-    closeModal(); load()
+    closeModal()
+    load()
   } catch (e) { toast(e.message, 'error') }
 }
 
