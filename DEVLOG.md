@@ -1,7 +1,7 @@
 # Decco OS — Geliştirici El Kitabı (AI Handoff)
 
 > Bu dosya başka bir yapay zekanın projeye bağlanıp kaldığı yerden devam edebilmesi için yazılmıştır.
-> Son güncelleme: 2026-09-10 · Commit: `94cad0c`
+> Son güncelleme: 2026-09-11 · Açılış Lifecycle, Capability Guards & Audit Correction
 
 ---
 
@@ -44,6 +44,7 @@ deccoderi/
 ├── api/
 │   ├── src/
 │   │   ├── index.js          ← Express app, route mount'ları, auth/guard middleware
+│   │   ├── opening-guard.js  ← Domain/capability bazlı açılış guard'ları
 │   │   ├── db.js             ← pool + query helper
 │   │   └── routes/
 │   │       ├── auth.js
@@ -87,31 +88,29 @@ deccoderi/
 
 ## Kritik Mimari Kararlar
 
-### 1. PRE-OPENING Guard
+### 1. Açılış Yaşam Döngüsü ve Capability Guard (Opening Lifecycle & Guards)
 
-Sistem iki modda çalışır:
-- **PRE-OPENING**: `opening_sessions` tablosunda `locked_at IS NULL` olan satır var → açılış tamamlanmamış
-- **OPEN**: `locked_at IS NOT NULL` → sistem canlı
+Açılış süreci ve günlük operasyonel kullanım 3 kanonik duruma ayrılmıştır:
+- **`draft`**: Açılış hazırlığı (`status = 'draft'`). Go-live tarihi doğrulanır (4 haneli yıl 2000–2100 aralığında, timezone bağımsız YYYY-MM-DD takvim tarihi).
+- **`open`**: Sistem operasyonel kullanıma açılmış (`status = 'open'`). Günlük operasyonlar serbesttir; ancak henüz teyit edilmemiş başlangıç verileri için **domain bazlı capability guard** devrededir (`api/src/opening-guard.js`). Eksik başlangıç verileri *"Açılış Verilerini Tamamla"* modunda tamamlanabilir.
+- **`completed`**: Tüm 8 checklist bölümü tamamlanıp kilitlenmiştir (`locked_at IS NOT NULL` veya `status = 'completed'`).
 
-```js
-// api/src/index.js
-function isSystemOpen() { ... }          // DB'yi sorgular
-function requireOpened(req, res, next)   // 423 döner PRE-OPENING'de
+**Capability Guard Kuralları (`api/src/opening-guard.js`):**
+- **Kapsam (Pre-go-live vs. Post-go-live):** Guard yalnızca go-live anında mevcut kayıtlar için geçerlidir. Go-live sonrasında oluşturulan yeni hesap, tedarikçi, müşteri, malzeme veya hazır ürün kayıtları açılış doğrulaması istemez; doğrudan canlı hareketlerle çalışır.
+- **Ham Madde:** Pre-go-live malzemelerde `counted_at IS NULL` (sayılmadı) ise sarfiyat/üretim veya stok düzeltme engellenir (HTTP 409: *"Bu malzemenin açılış sayımı tamamlanmamış. Açılış Verilerini Tamamla ekranından sayım yapın."*). Go-live sonrası yeni malzemeler açılış satırı olmasa da ilk stok girişinden sonra serbestçe kullanılır.
+- **Kasa / Banka:** Açılış bakiyesi teyit edilmemiş hesaplarda harcama, transfer ve tahsilat engellenir. Doğrulanan hesaplar çalışır.
+- **Tedarikçi:** Açılış borcu teyit edilmemiş tedarikçilerde mevcut borç mutlak değerini etkileyen işlemler (ödeme, iade, indirim) engellenir.
+- **Müşteri Alacakları:** Sipariş tarihi `< go_live_date` olan tarihsel alacaklar teyit edilene kadar tahsilatı engellenir; post-go-live siparişler normal tahsilat akışıyla çalışır.
 
-// Guard mount'ları — bu route'lar PRE-OPENING'de 423 döner:
-app.use('/api/suppliers/:id/payments',  requireOpened)
-app.use('/api/suppliers/:id/returns',   requireOpened)
-app.use('/api/suppliers/:id/discounts', requireOpened)
-app.use('/api/finance/collections',     requireOpened)
-// ... (tam liste index.js'te)
-```
+### 2. Açılış Verilerini Tamamla ve Güvenli Düzeltme Akışı (`opening.html` & `opening.js`)
 
-**Mevcut durum:** Açılış oturumu id=1, `locked_at` dolu → sistem **OPEN** modunda.
-
-### 2. Açılış Sihirbazı (`opening.html`)
-
-Tek seferlik süreç; tamamlandıktan sonra açılış sayfası pasif olur.
-Açılış oturumunu kilitleyen endpoint: `POST /api/opening/lock` — geri alınamaz.
+- **Açık Kaydet Butonu (`onchange` kaldırıldı):** Ham madde, kasa/banka ve tedarikçi satırlarında `onchange` / `blur` ile otomatik kaydetme tamamen kaldırılmıştır. Miktar + birim maliyet + konum ancak satırdaki açık **Kaydet** butonu tıklandığında doğrulanıp kaydedilir.
+- **Açılış Tamamlama (`POST /api/opening/materials/:lineId/complete`):** `open` modda sayılmamış malzeme girildiğinde canlı stok hareketi `reference_type='OPENING_COMPLETION'` ile işlenir.
+- **Audit Korumalı Düzeltme (`POST /api/opening/materials/:lineId/correct`):**
+  - **409 Guard:** Malzemede açılıştan sonra başka stok hareketi (satın alma, üretim tüketimi veya stok düzeltme) oluşmuşsa HTTP 409 döner; geriye dönük `avg_cost` hesaplama karmaşasına girilmez.
+  - **Ters Kayıt + Yeni Kayıt:** Eski açılış hareketi silinmez. Denetim izini korumak için `-old_qty` ile ters kayıt, ardından `+new_qty` ile yeni kayıt oluşturulur (`reference_type='OPENING_CORRECTION'`).
+  - **PostgreSQL 42725 Çözümü:** SQL metninde unar eksi (`-$2`) kullanılmaz, JS parametresinde `-oldQty` geçilir. Stok/maliyet güncellemesinde `$1::numeric + $2::numeric` ve `$2::numeric > 0` açık tip cast kullanılır.
+- **Nihai Kilit (`POST /api/opening/lock`):** Yalnızca tüm 8 bölüm tamamlandığında çalıştırılır; `OPENING`, `OPENING_COMPLETION` ve `OPENING_CORRECTION` hareketlerini mükerrer oluşturmayacak şekilde korur.
 
 ### 3. Telefon Normalizasyonu
 
@@ -211,8 +210,11 @@ Açık alacak    :  5.500 TL
 ### Tedarikçiler
 ALİ KARAYAZI, meta, vaketa deri, hepsiburada, KARGONOMİ — hepsinin `total_debt = 0`
 
-### Açılış Oturumu
-`opening_sessions` id=1, `locked_at IS NOT NULL` → sistem **OPEN** modunda.
+### Açılış Oturumu (2026-09-11 İtibarıyla)
+`opening_sessions` id=1:
+- `status = 'open'`, `locked_at = NULL` → Sistem operasyonel açık modda (canlı işlemler açık, eksik bölümler tamamlanabilir).
+- Go-live tarihi: `2026-09-10` (takvim tarihi).
+- PB-KKH açılış sayımı düzeltme akışı ve audit ters kayıt mekanizmasıyla doğru değerlerine (227 desi / 22 TL) alınabilir durumda.
 
 ---
 
@@ -252,6 +254,29 @@ ALİ KARAYAZI, meta, vaketa deri, hepsiburada, KARGONOMİ — hepsinin `total_de
 
 - **Aşama 1** (kısmen tamamlandı): Siparişler aylık sayfalama, yeni sipariş modalı müşteri seçimi, sipariş silme, müşteri detay sayfası
 - **Aşama 2** (henüz başlanmadı): Müşteri tahsilat ekranı, tedarikçi cari tablo, ürün sıralama/pasif
+
+---
+
+## 2026-09-11 Değişiklik Notları
+
+1. **Açılış Yaşam Döngüsü Ayrımı (draft → open → completed):**
+   - Açılış kilitlenme şartı (`locked_at`) ile operasyonel kullanım (`status = 'open'`) birbirinden ayrıldı. Sistem tüm checklist bitmeden canlı kullanıma açılabilir hale getirildi.
+   - Go-live tarihi doğrulama kuralı eklendi: 4 haneli yıl (2000–2100), ISO calendar date (YYYY-MM-DD), frontend'de kısmi tarih girişlerinde otomatik submit engellendi.
+
+2. **Domain Bazlı Capability Guards (`api/src/opening-guard.js`):**
+   - Açılışı tamamlanmamış hesap, tedarikçi, müşteri alacağı ve malzemeler için domain bazlı koruma eklendi.
+   - **Post-go-live istisnası:** Go-live sonrası oluşturulan yeni hesap, tedarikçi, müşteri, malzeme veya ürünler açılış guard'ından muaf tutuldu.
+   - Sayılmamış pre-go-live malzeme normal stok düzeltmeye sokulmak istendiğinde 500 yerine açıklayıcı HTTP 409 dönmesi sağlandı (*"Bu malzemenin açılış sayımı tamamlanmamış. Açılış Verilerini Tamamla ekranından sayım yapın."*).
+
+3. **`onchange` Otomatik Kaydının Kaldırılması (`web/src/opening.html`):**
+   - Kullanıcı miktar veya maliyet yazarken blur/spinner adımlarında verinin yarım kaydedilmesini önlemek amacıyla `onchange` otomatik kaydı tamamen kaldırıldı.
+   - Ham madde, kasa ve tedarikçi satırlarına açık **Kaydet** butonu eklendi; miktar + birim maliyet + konum yalnız butona tıklandığında kaydedilir.
+
+4. **Audit Korumalı Düzeltme Endpoint'i (`POST /api/opening/materials/:lineId/correct`):**
+   - Açılış sonrasında başka stok hareketi olan malzemelerde geriye dönük `avg_cost` bozulmaması için 409 guard'ı uygulandı.
+   - Eski açılış hareketi silinmeden ters kayıt (`-old_qty`) ve yeni kayıt (`+new_qty`) ile denetim izi korunarak `reference_type='OPENING_CORRECTION'` ile kaydedilmesi sağlandı.
+   - PostgreSQL `42725 (operator is not unique: - unknown)` hatası parametrik negatif değer (`-oldQty`) ve `::numeric` cast ile çözüldü.
+   - Operasyonel modda sayılmış kilitli satırlara **Düzelt** butonu ve modalı eklendi (PB-KKH 0.0001 miktar / 227 maliyet hatasının 227 desi / 22 TL olarak güvenle düzeltilebilmesi sağlandı).
 
 ---
 
