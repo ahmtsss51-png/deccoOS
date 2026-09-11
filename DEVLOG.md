@@ -208,7 +208,9 @@ Açık alacak    :  5.500 TL
 | 4 | Test Kasa | 0 TL |
 
 ### Tedarikçiler
-ALİ KARAYAZI, meta, vaketa deri, hepsiburada, KARGONOMİ — hepsinin `total_debt = 0`
+- Malzeme Tedarikçileri (`material_supplier`): ALİ KARAYAZI (id=1), vaketa deri (id=3)
+- Hizmet Sağlayıcılar (`service_provider`): meta (id=2), hepsiburada (id=4), KARGONOMİ (id=5) — Tedarikçiler modülü ve açılış borç checklist'inden filtrelenmiştir; cari işlemler yalnız `material_supplier` için geçerlidir.
+- Borç durumu: hepsinin `total_debt = 0`
 
 ### Açılış Oturumu (2026-09-11 İtibarıyla)
 `opening_sessions` id=1:
@@ -277,6 +279,22 @@ ALİ KARAYAZI, meta, vaketa deri, hepsiburada, KARGONOMİ — hepsinin `total_de
    - Eski açılış hareketi silinmeden ters kayıt (`-old_qty`) ve yeni kayıt (`+new_qty`) ile denetim izi korunarak `reference_type='OPENING_CORRECTION'` ile kaydedilmesi sağlandı.
    - PostgreSQL `42725 (operator is not unique: - unknown)` hatası parametrik negatif değer (`-oldQty`) ve `::numeric` cast ile çözüldü.
    - Operasyonel modda sayılmış kilitli satırlara **Düzelt** butonu ve modalı eklendi (PB-KKH 0.0001 miktar / 227 maliyet hatasının 227 desi / 22 TL olarak güvenle düzeltilebilmesi sağlandı).
+
+5. **Tedarikçi Türü Ayrımı (`material_supplier` vs `service_provider`):**
+   - `suppliers` tablosuna `CHECK (supplier_type IN ('material_supplier', 'service_provider'))` constraint'i ve `DEFAULT 'material_supplier'` ile `supplier_type` kolonu eklendi.
+   - Mevcut veride `meta`, `hepsiburada` ve `KARGONOMİ` hizmet sağlayıcı (`service_provider`), `ALİ KARAYAZI` ve `vaketa deri` malzeme tedarikçisi (`material_supplier`) olarak sınıflandırıldı; hiçbir geçmiş kayıt silinmedi.
+   - Tedarikçiler listesi (`GET /api/suppliers`), detay sayfası ve cari işlemler (alım, ödeme, iade, iskonto, ekstre) yalnız `material_supplier` için çalışacak şekilde kısıtlandı.
+   - Açılış checklist'i, `start-operations`, `lock` ve açılış tedarikçi listesinde hizmet sağlayıcılar filtrelendi; eski service-provider açılış satırlarının açılış tamamlanmasını bloke etmesi engellendi (checklist yalnız 2 malzeme tedarikçisi üzerinden değerlendirilir).
+
+6. **Müşteri Tahsilatında “Tedarikçiye Doğrudan Ödeme” Yöntemi & UI Regresyon Çözümü:**
+   - Sipariş ve Finans tahsilat modallarına `direct_to_supplier` ödeme yöntemi eklendi.
+   - Bu yöntem seçildiğinde kasa/banka hesabı seçimi kaldırılır; money account ve `transactions` hareketi oluşturulmaz; kasa bakiyesi etkilenmez.
+   - `customer_payments` ve `supplier_payments` tablolarında `account_id` yalnız `direct_to_supplier` / `direct_from_customer` tipleri için `NULL` kabul edilecek şekilde DB CHECK constraint ile korundu (`customer_payments_account_check`, `supplier_payments_account_check`).
+   - Müşteri alacağı (`orders.paid_amount`), müşteri tahsilat kaydı (`customer_payments`), tedarikçi ödeme kaydı (`supplier_payments`) ve tedarikçi borcu (`suppliers.total_debt`) tek bir DB transaction'ı içinde atomik olarak kilitlenip güncellendi (`FOR UPDATE`).
+   - Tutar sınırı hem siparişin açık alacağı hem de seçilen tedarikçinin mevcut `total_debt` borcu ile çift taraflı sınırlandırıldı.
+   - Açılış capability guard'ları entegre edildi: doğrulanmamış tarihsel müşteri alacağı (`assertOrderPayable`) veya doğrulanmamış tedarikçi açılış borcu (`assertSupplierReady`) üzerinden tahsilat yapılması engellendi.
+   - Rapor ve dashboard sorgularına (`reports.js`, `dashboard.js`) kasa hareketi yaratmayan doğrudan ödemeler dahil edildi.
+   - **UI Regresyon Kök Nedeni ve Çözümü:** `GET /api/suppliers` endpoint'inin bir array yerine `{ items: [...], opening_locked: true }` objesi dönmesi nedeniyle `orders.html` ve `finance.html` içindeki `suppliers.map()` çağrısı `TypeError` verip modal açılışını engelliyordu. `Array.isArray(supData) ? supData : (supData?.items || [])` kontrolü ile tedarikçi listesi güvenle unpack edildi; her iki ekranda da modal açılışı ve dinamik alan geçişleri doğrulandı.
 
 ---
 

@@ -173,6 +173,7 @@ window.saveSupplier = async (id) => {
     name: document.getElementById('s-name').value.trim(),
     phone: document.getElementById('s-phone').value || null,
     notes: document.getElementById('s-notes').value || null,
+    supplier_type: 'material_supplier',
   }
   if (!body.name) { toast('Ad zorunludur', 'error'); return }
   try {

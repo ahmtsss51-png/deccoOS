@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS suppliers (
   phone      VARCHAR(20),
   notes      TEXT,
   total_debt NUMERIC(14,2) DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  supplier_type VARCHAR(50) NOT NULL DEFAULT 'material_supplier' CHECK (supplier_type IN ('material_supplier', 'service_provider'))
 );
 
 CREATE TABLE IF NOT EXISTS purchases (
@@ -443,3 +444,45 @@ ON CONFLICT (name) DO NOTHING;
 INSERT INTO users (full_name, username, password_hash, role, department)
 VALUES ('Yönetici', 'admin', '$2a$10$YVDFRTR/IzUIblBReAGZL.ZuBPGVdSBL1RNJVx.nohTQx6d6e7tQa', 'admin', 'Yönetim')
 ON CONFLICT (username) DO NOTHING;
+
+-- Tedarikçi türü: material_supplier | service_provider
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'suppliers' AND column_name = 'supplier_type'
+  ) THEN
+    ALTER TABLE suppliers ADD COLUMN supplier_type VARCHAR(50) NOT NULL DEFAULT 'material_supplier';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'suppliers_supplier_type_check'
+  ) THEN
+    ALTER TABLE suppliers ADD CONSTRAINT suppliers_supplier_type_check
+      CHECK (supplier_type IN ('material_supplier', 'service_provider'));
+  END IF;
+
+  -- Tedarikçiye Doğrudan Ödeme (direct_to_supplier) desteği
+  ALTER TABLE customer_payments ALTER COLUMN account_id DROP NOT NULL;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='customer_payments' AND column_name='supplier_id') THEN
+    ALTER TABLE customer_payments ADD COLUMN supplier_id INT REFERENCES suppliers(id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='customer_payments_account_check') THEN
+    ALTER TABLE customer_payments ADD CONSTRAINT customer_payments_account_check
+      CHECK ((method = 'direct_to_supplier' AND account_id IS NULL) OR (method <> 'direct_to_supplier' AND account_id IS NOT NULL));
+  END IF;
+
+  ALTER TABLE supplier_payments ALTER COLUMN account_id DROP NOT NULL;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_payments' AND column_name='payment_type') THEN
+    ALTER TABLE supplier_payments ADD COLUMN payment_type VARCHAR(50) DEFAULT 'account';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_payments' AND column_name='customer_id') THEN
+    ALTER TABLE supplier_payments ADD COLUMN customer_id INT REFERENCES customers(id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_payments' AND column_name='order_id') THEN
+    ALTER TABLE supplier_payments ADD COLUMN order_id INT REFERENCES orders(id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='supplier_payments_account_check') THEN
+    ALTER TABLE supplier_payments ADD CONSTRAINT supplier_payments_account_check
+      CHECK ((payment_type = 'direct_from_customer' AND account_id IS NULL) OR (payment_type <> 'direct_from_customer' AND account_id IS NOT NULL));
+  END IF;
+END $$;

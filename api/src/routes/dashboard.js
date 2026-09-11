@@ -33,8 +33,13 @@ router.get('/', async (_req, res, next) => {
           -- CHK-D02: Satış = sipariş toplam (order_date), Tahsilat = kasa girişi (transaction_date)
           (SELECT COALESCE(SUM(total_amount),0) FROM orders WHERE deleted_at IS NULL AND status != 'cancelled'
             AND DATE_TRUNC('month', order_date) = DATE_TRUNC('month', NOW())) AS this_month_sales,
-          (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE transaction_type='customer_payment' AND amount > 0
-            AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_income,
+          (SELECT (
+            COALESCE((SELECT SUM(amount) FROM transactions WHERE transaction_type='customer_payment' AND amount > 0
+              AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())), 0)
+            +
+            COALESCE((SELECT SUM(amount) FROM customer_payments WHERE method='direct_to_supplier'
+              AND DATE_TRUNC('month', paid_at) = DATE_TRUNC('month', NOW())), 0)
+          )) AS this_month_income,
           (SELECT COALESCE(SUM(ABS(amount)),0) FROM transactions WHERE amount < 0
             AND DATE_TRUNC('month', transaction_date) = DATE_TRUNC('month', NOW())) AS this_month_expense,
           -- CHK-D01: Açılış kilitli mi?

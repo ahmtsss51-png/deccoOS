@@ -42,17 +42,28 @@ router.get('/:id', async (req, res, next) => {
       GROUP BY o.id
       ORDER BY o.order_date DESC NULLS LAST, o.id DESC`, [req.params.id])
 
-    // Tahsilat geçmişi: sipariş referanslı hareketler (ters kayıtlar dahil)
+    // Tahsilat geçmişi: sipariş referanslı hareketler + doğrudan tedarikçiye yapılan ödemeler
     const payments = await query(`
-      SELECT t.id, t.amount, t.description, t.transaction_date, t.reference_id,
-             t.reference_type, a.name AS account_name, o.order_no
-      FROM transactions t
-      JOIN orders o ON o.id = t.reference_id
-      LEFT JOIN accounts a ON a.id = t.account_id
-      WHERE t.reference_type IN ('order','order_reversal')
-        AND t.transaction_type='customer_payment'
-        AND o.customer_id=$1
-      ORDER BY t.transaction_date DESC, t.id DESC`, [req.params.id])
+      SELECT * FROM (
+        SELECT t.id, t.amount, t.description, t.transaction_date, t.reference_id,
+               t.reference_type, a.name AS account_name, o.order_no
+        FROM transactions t
+        JOIN orders o ON o.id = t.reference_id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.reference_type IN ('order','order_reversal')
+          AND t.transaction_type='customer_payment'
+          AND o.customer_id=$1
+        UNION ALL
+        SELECT cp.id, cpa.amount, cp.description, cp.paid_at AS transaction_date, cpa.order_id AS reference_id,
+               'order' AS reference_type, ('Tedarikçiye Doğrudan: ' || COALESCE(s.name, '')) AS account_name, o.order_no
+        FROM customer_payments cp
+        JOIN customer_payment_allocations cpa ON cpa.payment_id = cp.id
+        JOIN orders o ON o.id = cpa.order_id
+        LEFT JOIN suppliers s ON s.id = cp.supplier_id
+        WHERE cp.method = 'direct_to_supplier'
+          AND cp.customer_id = $1
+      ) p
+      ORDER BY p.transaction_date DESC, p.id DESC`, [req.params.id])
 
     const stats = await query(`
       SELECT COUNT(*) AS order_count,

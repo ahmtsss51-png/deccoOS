@@ -10,7 +10,7 @@ router.get('/', async (_req, res, next) => {
       query(`SELECT s.*, MAX(p.purchase_date) AS last_purchase_at
              FROM suppliers s
              LEFT JOIN purchases p ON p.supplier_id = s.id
-             WHERE s.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND s.supplier_type = 'material_supplier'
              GROUP BY s.id ORDER BY s.name`),
       isSystemOpen(),
     ])
@@ -20,8 +20,8 @@ router.get('/', async (_req, res, next) => {
 
 router.get('/:id', async (req, res, next) => {
   try {
-    const { rows } = await query('SELECT * FROM suppliers WHERE id=$1', [req.params.id])
-    if (!rows[0]) return res.status(404).json({ error: 'Not found' })
+    const { rows } = await query('SELECT * FROM suppliers WHERE id=$1 AND supplier_type=$2', [req.params.id, 'material_supplier'])
+    if (!rows[0]) return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
     const stats = await query(`
       SELECT COALESCE(SUM(total_amount),0) AS lifetime_purchases,
              MAX(purchase_date) AS last_purchase_at
@@ -43,22 +43,31 @@ router.get('/:id', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    const { name, phone, notes, email, address, tax_no } = req.body
+    const { name, phone, notes, email, address, tax_no, supplier_type } = req.body
     if (!name?.trim()) return res.status(400).json({ error: 'Ad zorunludur' })
+    const type = supplier_type || 'material_supplier'
+    if (!['material_supplier', 'service_provider'].includes(type)) {
+      return res.status(400).json({ error: 'Geçersiz tedarikçi türü' })
+    }
     const { rows } = await query(
-      'INSERT INTO suppliers (name,phone,notes,email,address,tax_no) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-      [name.trim(), phone || null, notes || null, email || null, address || null, tax_no || null])
+      'INSERT INTO suppliers (name,phone,notes,email,address,tax_no,supplier_type) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+      [name.trim(), phone || null, notes || null, email || null, address || null, tax_no || null, type])
     res.status(201).json(rows[0])
   } catch (e) { next(e) }
 })
 
 router.put('/:id', async (req, res, next) => {
   try {
-    const { name, phone, notes, email, address, tax_no } = req.body
+    const { name, phone, notes, email, address, tax_no, supplier_type } = req.body
+    const { rows: existing } = await query('SELECT * FROM suppliers WHERE id=$1', [req.params.id])
+    if (!existing[0]) return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
+    const type = supplier_type || existing[0].supplier_type || 'material_supplier'
+    if (!['material_supplier', 'service_provider'].includes(type)) {
+      return res.status(400).json({ error: 'Geçersiz tedarikçi türü' })
+    }
     const { rows } = await query(
-      `UPDATE suppliers SET name=$1,phone=$2,notes=$3,email=$4,address=$5,tax_no=$6 WHERE id=$7 RETURNING *`,
-      [name, phone || null, notes || null, email || null, address || null, tax_no || null, req.params.id])
-    if (!rows[0]) return res.status(404).json({ error: 'Not found' })
+      `UPDATE suppliers SET name=$1,phone=$2,notes=$3,email=$4,address=$5,tax_no=$6,supplier_type=$7 WHERE id=$8 RETURNING *`,
+      [name, phone || null, notes || null, email || null, address || null, tax_no || null, type, req.params.id])
     res.json(rows[0])
   } catch (e) { next(e) }
 })
@@ -89,6 +98,10 @@ router.delete('/:id', async (req, res, next) => {
 
 router.get('/:id/purchases', async (req, res, next) => {
   try {
+    const { rows: sup } = await query('SELECT id, supplier_type FROM suppliers WHERE id=$1', [req.params.id])
+    if (!sup[0] || sup[0].supplier_type !== 'material_supplier') {
+      return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
+    }
     const { rows } = await query(
       `SELECT p.*, JSON_AGG(JSON_BUILD_OBJECT('material_id',pl.material_id,'quantity',pl.quantity,'unit_cost',pl.unit_cost,'material_name',m.name,'material_sku',m.sku) ORDER BY pl.id) AS lines
        FROM purchases p
@@ -103,6 +116,10 @@ router.get('/:id/purchases', async (req, res, next) => {
 
 router.get('/:id/ledger', async (req, res, next) => {
   try {
+    const { rows: sup } = await query('SELECT id, supplier_type FROM suppliers WHERE id=$1', [req.params.id])
+    if (!sup[0] || sup[0].supplier_type !== 'material_supplier') {
+      return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
+    }
     const { rows } = await query(`
       SELECT * FROM (
         SELECT p.purchase_date::timestamptz AS date, 'purchase' AS entry_type,
@@ -147,6 +164,10 @@ router.post('/:id/payments', async (req, res, next) => {
     await assertAccountReady(account_id)
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
     if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (sup[0].supplier_type !== 'material_supplier') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Yalnızca malzeme tedarikçilerine ödeme yapılabilir' })
+    }
     const amt = parseFloat(amount)
 
     const { rows: sp } = await client.query(`
@@ -191,6 +212,10 @@ router.post('/:id/returns', async (req, res, next) => {
 
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
     if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (sup[0].supplier_type !== 'material_supplier') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Yalnızca malzeme tedarikçilerine iade yapılabilir' })
+    }
 
     // CHK-T04: purchase_id verilmişse iade satırlarını purchase_lines ile doğrula
     if (purchase_id) {
@@ -274,6 +299,11 @@ router.post('/purchases', async (req, res, next) => {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'En az 1 malzeme satırı gerekli' })
     }
+    const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1', [supplier_id])
+    if (!sup[0] || sup[0].supplier_type !== 'material_supplier') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Satın alma yalnızca malzeme tedarikçileri için oluşturulabilir' })
+    }
     await assertSupplierReady(supplier_id)
     if (paid_amount && account_id) {
       await assertAccountReady(account_id)
@@ -333,6 +363,10 @@ router.post('/:id/discounts', async (req, res, next) => {
     await assertSupplierReady(req.params.id)
     const { rows: sup } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [req.params.id])
     if (!sup[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (sup[0].supplier_type !== 'material_supplier') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'Yalnızca malzeme tedarikçilerine iskonto uygulanabilir' })
+    }
 
     const { rows: disc } = await client.query(
       `INSERT INTO supplier_discounts (supplier_id,purchase_id,amount,notes,discount_date)

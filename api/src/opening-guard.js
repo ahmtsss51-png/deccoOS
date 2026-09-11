@@ -71,8 +71,10 @@ export async function assertSupplierReady(supplierId) {
   const s = await getOpeningSession()
   if (!s || s.status !== 'open') return
   const { rows } = await query(
-    `SELECT amount FROM opening_lines
-     WHERE session_id = $1 AND section = 'supplier_debt' AND supplier_id = $2`,
+    `SELECT l.amount FROM opening_lines l
+     JOIN suppliers sup ON sup.id = l.supplier_id
+     WHERE l.session_id = $1 AND l.section = 'supplier_debt'
+       AND l.supplier_id = $2 AND sup.supplier_type = 'material_supplier'`,
     [s.id, supplierId]
   )
   if (rows.length > 0 && rows[0].amount === null) {

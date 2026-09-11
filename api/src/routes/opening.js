@@ -81,6 +81,7 @@ async function seedLines(sessionId) {
     INSERT INTO opening_lines (session_id, section, ref_key, supplier_id, previous_value)
     SELECT $1, 'supplier_debt', s.id::text, s.id, s.total_debt
     FROM suppliers s
+    WHERE s.deleted_at IS NULL AND s.supplier_type = 'material_supplier'
     ON CONFLICT (session_id, section, ref_key) DO NOTHING`, [sessionId])
 
   await query(`
@@ -92,14 +93,19 @@ async function seedLines(sessionId) {
 // --- İlerleme hesabı --------------------------------------------------------
 
 async function buildChecklist(session) {
-  const { rows } = await query('SELECT * FROM opening_lines WHERE session_id=$1', [session.id])
-  const of = s => rows.filter(r => r.section === s)
+  const { rows } = await query(`
+    SELECT l.*, s.supplier_type
+    FROM opening_lines l
+    LEFT JOIN suppliers s ON s.id = l.supplier_id
+    WHERE l.session_id=$1`, [session.id])
+  const of = sec => rows.filter(r => r.section === sec)
   const conf = session.confirmations || {}
 
   const materials = of('material')
   const accounts = of('account')
   const receivables = of('receivable')
-  const debts = of('supplier_debt')
+  // Yalnız material_supplier olan tedarikçiler açılış checklist ve completeness kapsamındadır
+  const debts = of('supplier_debt').filter(d => !d.supplier_type || d.supplier_type === 'material_supplier')
   const founder = of('founder')[0]
   const finished = of('finished_good')
   const { rows: assets } = await query(
@@ -292,10 +298,10 @@ router.post('/start-operations', async (req, res, next) => {
       }
     }
 
-    // 4) Tedarikçi borçları — doğrulanmış borçlar
+    // 4) Tedarikçi borçları — doğrulanmış borçlar (yalnız material_supplier)
     for (const l of of('supplier_debt')) {
       if (l.amount !== null) {
-        await client.query('UPDATE suppliers SET total_debt = $2 WHERE id = $1',
+        await client.query('UPDATE suppliers SET total_debt = $2 WHERE id = $1 AND supplier_type = \'material_supplier\'',
           [l.supplier_id, parseFloat(l.amount) || 0])
       }
     }
@@ -760,7 +766,8 @@ router.get('/suppliers', async (_req, res, next) => {
       SELECT l.id, l.supplier_id, sup.name, l.amount, l.previous_value, l.notes,
              (SELECT COALESCE(SUM(p.paid_amount), 0) FROM purchases p WHERE p.supplier_id = sup.id) AS historical_spend
       FROM opening_lines l JOIN suppliers sup ON sup.id = l.supplier_id
-      WHERE l.session_id=$1 AND l.section='supplier_debt' ORDER BY sup.name`, [s.id])
+      WHERE l.session_id=$1 AND l.section='supplier_debt' AND sup.supplier_type = 'material_supplier'
+      ORDER BY sup.name`, [s.id])
     res.json(rows)
   } catch (e) { next(e) }
 })
@@ -841,7 +848,7 @@ router.put('/lines/:lineId', async (req, res, next) => {
           [line.account_id, num])
       } else if (line.section === 'supplier_debt' && line.amount === null) {
         const num = parseFloat(amt) || 0
-        await client.query('UPDATE suppliers SET total_debt = total_debt + $2 WHERE id=$1',
+        await client.query('UPDATE suppliers SET total_debt = total_debt + $2 WHERE id=$1 AND supplier_type = \'material_supplier\'',
           [line.supplier_id, num])
       }
     }
@@ -1036,7 +1043,7 @@ router.post('/lock', async (req, res, next) => {
     // 5) Tedarikçi borçları — sistem open moduna girmeden doğrudan lock edildiyse borçları işle
     if (session.status !== 'open') {
       for (const l of of('supplier_debt')) {
-        await client.query('UPDATE suppliers SET total_debt=$2 WHERE id=$1',
+        await client.query('UPDATE suppliers SET total_debt=$2 WHERE id=$1 AND supplier_type = \'material_supplier\'',
           [l.supplier_id, parseFloat(l.amount) || 0])
       }
     }

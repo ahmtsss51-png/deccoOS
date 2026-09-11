@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
-import { isSystemOpen } from '../opening-guard.js'
+import { isSystemOpen, assertAccountReady, assertSupplierReady, assertOrderPayable } from '../opening-guard.js'
 
 const router = Router()
 
@@ -156,7 +156,8 @@ router.post('/:id/payments', async (req, res, next) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const { amount, account_id, description } = req.body
+    const { amount, account_id, description, payment_method, supplier_id } = req.body
+    const isDirectToSupplier = payment_method === 'direct_to_supplier'
 
     const { rows: orderRows } = await client.query(
       'SELECT * FROM orders WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [req.params.id])
@@ -167,26 +168,116 @@ router.post('/:id/payments', async (req, res, next) => {
 
     const order = orderRows[0]
     const open = parseFloat(order.total_amount) - parseFloat(order.paid_amount)
-    if (!(amount > 0)) {
+    const amt = parseFloat(amount)
+    if (!(amt > 0)) {
       await client.query('ROLLBACK')
       return res.status(400).json({ error: 'Tutar sıfırdan büyük olmalı' })
     }
-    if (amount > open + 0.005) {
+    if (amt > open + 0.005) {
       await client.query('ROLLBACK')
       return res.status(400).json({
         error: `Bu siparişin açık tutarı ₺${open.toFixed(2)}; daha fazlası tahsil edilemez` })
     }
 
-    await client.query(
-      'UPDATE orders SET paid_amount=paid_amount+$1 WHERE id=$2',
-      [amount, req.params.id]
-    )
-    await client.query(
-      `INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description)
-       VALUES ($1,$2,'customer_payment','order',$3,$4)`,
-      [account_id, amount, req.params.id, description]
-    )
-    await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amount, account_id])
+    // Historical customer receivable opening guard
+    await assertOrderPayable(req.params.id)
+
+    if (isDirectToSupplier) {
+      if (!supplier_id) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Tedarikçi seçilmelidir' })
+      }
+
+      // Tedarikçi satırı FOR UPDATE ile kilitlenir (yarış durumu engellenir)
+      const { rows: supRows } = await client.query(
+        'SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [supplier_id])
+      if (!supRows[0]) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Tedarikçi bulunamadı' })
+      }
+      const supplier = supRows[0]
+      if (supplier.deleted_at || supplier.is_active === false) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Seçilen tedarikçi aktif değil' })
+      }
+      if (supplier.supplier_type !== 'material_supplier') {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Yalnızca malzeme tedarikçilerine doğrudan ödeme yapılabilir' })
+      }
+
+      // Supplier opening payable debt guard
+      await assertSupplierReady(supplier_id)
+
+      const supDebt = parseFloat(supplier.total_debt) || 0
+      if (amt > supDebt + 0.005) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({
+          error: `Tutar tedarikçinin mevcut borcunu (₺${supDebt.toFixed(2)}) aşamaz` })
+      }
+
+      // Müşteri bilgisi
+      const { rows: custRows } = await client.query('SELECT name FROM customers WHERE id=$1', [order.customer_id])
+      const custName = custRows[0]?.name || 'Müşteri'
+      const orderLabel = order.order_no || `#${order.id}`
+
+      // 1. Müşteri alacağı azaltılır (orders.paid_amount)
+      await client.query(
+        'UPDATE orders SET paid_amount=paid_amount+$1 WHERE id=$2',
+        [amt, req.params.id]
+      )
+
+      // 2. Müşteri tahsilat kaydı (customer_payments) — account_id NULL
+      const cpDesc = description || `Tedarikçiye Doğrudan Ödeme: ${supplier.name}`
+      const { rows: cpRows } = await client.query(`
+        INSERT INTO customer_payments (customer_id, account_id, supplier_id, amount, method, description)
+        VALUES ($1, NULL, $2, $3, 'direct_to_supplier', $4) RETURNING id`,
+        [order.customer_id, supplier_id, amt, cpDesc])
+
+      await client.query(`
+        INSERT INTO customer_payment_allocations (payment_id, order_id, amount)
+        VALUES ($1, $2, $3)`,
+        [cpRows[0].id, req.params.id, amt])
+
+      // 3. Tedarikçi ödeme kaydı (supplier_payments) — account_id NULL, payment_type direct_from_customer
+      const spDesc = `Müşteri doğrudan ödeme: ${custName} (Sipariş ${orderLabel})${description ? ' - ' + description : ''}`
+      await client.query(`
+        INSERT INTO supplier_payments (supplier_id, account_id, customer_id, order_id, amount, description, payment_type)
+        VALUES ($1, NULL, $2, $3, $4, $5, 'direct_from_customer')`,
+        [supplier_id, order.customer_id, req.params.id, amt, spDesc])
+
+      // 4. Tedarikçinin cari borcu azaltılır (suppliers.total_debt)
+      await client.query('UPDATE suppliers SET total_debt=total_debt-$1 WHERE id=$2', [amt, supplier_id])
+
+      // Money account ve transactions hareketi OLUŞTURULMAZ!
+    } else {
+      // Normal nakit / banka akışı
+      if (!account_id) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Hesap seçilmelidir' })
+      }
+      await assertAccountReady(account_id)
+
+      await client.query(
+        'UPDATE orders SET paid_amount=paid_amount+$1 WHERE id=$2',
+        [amt, req.params.id]
+      )
+      await client.query(
+        `INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description)
+         VALUES ($1,$2,'customer_payment','order',$3,$4)`,
+        [account_id, amt, req.params.id, description]
+      )
+      await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amt, account_id])
+
+      // customer_payments kaydı
+      const { rows: cpRows } = await client.query(`
+        INSERT INTO customer_payments (customer_id, account_id, amount, method, description)
+        VALUES ($1, $2, $3, 'account', $4) RETURNING id`,
+        [order.customer_id, account_id, amt, description || null])
+      await client.query(`
+        INSERT INTO customer_payment_allocations (payment_id, order_id, amount)
+        VALUES ($1, $2, $3)`,
+        [cpRows[0].id, req.params.id, amt])
+    }
 
     // Tam ödendiyse sadece ileri yön: draft/payment_pending -> confirmed
     await client.query(`

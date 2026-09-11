@@ -1,12 +1,40 @@
 import { Router } from 'express'
 import { query, pool } from '../db.js'
-import { isSystemOpen, assertAccountReady, assertOrderPayable } from '../opening-guard.js'
+import { isSystemOpen, assertAccountReady, assertSupplierReady, assertOrderPayable } from '../opening-guard.js'
 
 const router = Router()
 
 // Ortak çekirdek: müşteri tahsilatı — finance/collections ve orders/:id/payments tarafından kullanılır
-export async function applyCustomerPayment(client, { customer_id, account_id, amount, method, paid_at, description, allocations }) {
-  if (account_id) await assertAccountReady(account_id)
+export async function applyCustomerPayment(client, { customer_id, account_id, amount, method, paid_at, description, allocations, supplier_id }) {
+  const isDirectToSupplier = method === 'direct_to_supplier'
+  if (!isDirectToSupplier && account_id) {
+    await assertAccountReady(account_id)
+  }
+
+  // Müşteri bilgisi
+  const { rows: custRows } = await client.query('SELECT name FROM customers WHERE id=$1', [customer_id])
+  const custName = custRows[0]?.name || 'Müşteri'
+
+  let supplier = null
+  if (isDirectToSupplier) {
+    if (!supplier_id) throw Object.assign(new Error('Tedarikçi seçilmedi'), { status: 400 })
+    const { rows: supRows } = await client.query('SELECT * FROM suppliers WHERE id=$1 FOR UPDATE', [supplier_id])
+    if (!supRows[0]) throw Object.assign(new Error('Tedarikçi bulunamadı'), { status: 404 })
+    supplier = supRows[0]
+    if (supplier.deleted_at || supplier.is_active === false) {
+      throw Object.assign(new Error('Seçilen tedarikçi aktif değil'), { status: 400 })
+    }
+    if (supplier.supplier_type !== 'material_supplier') {
+      throw Object.assign(new Error('Yalnızca malzeme tedarikçilerine doğrudan ödeme yapılabilir'), { status: 400 })
+    }
+    await assertSupplierReady(supplier_id)
+
+    const supDebt = parseFloat(supplier.total_debt) || 0
+    if (amount > supDebt + 0.005) {
+      throw Object.assign(new Error(`Tutar tedarikçinin mevcut borcunu (₺${supDebt.toFixed(2)}) aşamaz`), { status: 400 })
+    }
+  }
+
   const { rows: openOrders } = await client.query(`
     SELECT id, order_no, total_amount, paid_amount, status,
            (total_amount - paid_amount) AS open_amount
@@ -35,10 +63,11 @@ export async function applyCustomerPayment(client, { customer_id, account_id, am
     if (total > amount + 0.005) throw Object.assign(new Error('Dağıtım tutarı toplam tutarı aşıyor'), { status: 400 })
   }
 
+  const cpDesc = description || (isDirectToSupplier ? `Tedarikçiye Doğrudan Ödeme: ${supplier.name}` : null)
   const { rows: cpRows } = await client.query(`
-    INSERT INTO customer_payments (customer_id, account_id, amount, method, description, paid_at)
-    VALUES ($1,$2,$3,$4,$5,COALESCE($6::timestamptz,NOW())) RETURNING id`,
-    [customer_id, account_id, amount, method || null, description || null, paid_at || null])
+    INSERT INTO customer_payments (customer_id, account_id, supplier_id, amount, method, description, paid_at)
+    VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz,NOW())) RETURNING id`,
+    [customer_id, isDirectToSupplier ? null : account_id, isDirectToSupplier ? supplier_id : null, amount, method || null, cpDesc, paid_at || null])
   const paymentId = cpRows[0].id
 
   for (const alloc of allocs) {
@@ -55,13 +84,28 @@ export async function applyCustomerPayment(client, { customer_id, account_id, am
     const newPaid = parseFloat(order.paid_amount) + applying
     if (newPaid >= parseFloat(order.total_amount) - 0.005 && ['draft', 'payment_pending'].includes(order.status))
       await client.query("UPDATE orders SET status='confirmed' WHERE id=$1", [alloc.order_id])
-    await client.query(`
-      INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description,transaction_date)
-      VALUES ($1,$2,'customer_payment','order',$3,$4,COALESCE($5::timestamptz,NOW()))`,
-      [account_id, applying, alloc.order_id, description || null, paid_at || null])
+
+    if (isDirectToSupplier) {
+      const orderLabel = order.order_no || `#${order.id}`
+      const spDesc = `Müşteri doğrudan ödeme: ${custName} (Sipariş ${orderLabel})${description ? ' - ' + description : ''}`
+      await client.query(`
+        INSERT INTO supplier_payments (supplier_id, account_id, customer_id, order_id, amount, description, paid_at, payment_type)
+        VALUES ($1, NULL, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()), 'direct_from_customer')`,
+        [supplier_id, customer_id, alloc.order_id, applying, spDesc, paid_at || null])
+    } else {
+      await client.query(`
+        INSERT INTO transactions (account_id,amount,transaction_type,reference_type,reference_id,description,transaction_date)
+        VALUES ($1,$2,'customer_payment','order',$3,$4,COALESCE($5::timestamptz,NOW()))`,
+        [account_id, applying, alloc.order_id, description || null, paid_at || null])
+    }
   }
 
-  await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amount, account_id])
+  if (isDirectToSupplier) {
+    await client.query('UPDATE suppliers SET total_debt=total_debt-$1 WHERE id=$2', [amount, supplier_id])
+  } else {
+    await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amount, account_id])
+  }
+
   return { payment_id: paymentId, allocations: allocs }
 }
 
@@ -91,12 +135,25 @@ router.post('/collections', async (req, res, next) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const { customer_id, account_id, amount, method, paid_at, description, allocations } = req.body
+    const { customer_id, account_id, amount, method, paid_at, description, allocations, supplier_id } = req.body
     if (!customer_id) throw Object.assign(new Error('Müşteri seçilmedi'), { status: 400 })
-    if (!account_id) throw Object.assign(new Error('Hesap seçilmedi'), { status: 400 })
+    if (method === 'direct_to_supplier') {
+      if (!supplier_id) throw Object.assign(new Error('Tedarikçi seçilmedi'), { status: 400 })
+    } else {
+      if (!account_id) throw Object.assign(new Error('Hesap seçilmedi'), { status: 400 })
+    }
     const amt = parseFloat(amount)
     if (!amt || amt <= 0) throw Object.assign(new Error('Geçerli tutar girin'), { status: 400 })
-    const result = await applyCustomerPayment(client, { customer_id, account_id, amount: amt, method, paid_at, description, allocations })
+    const result = await applyCustomerPayment(client, {
+      customer_id,
+      account_id: method === 'direct_to_supplier' ? null : account_id,
+      amount: amt,
+      method,
+      paid_at,
+      description,
+      allocations,
+      supplier_id: method === 'direct_to_supplier' ? supplier_id : null,
+    })
     await client.query('COMMIT')
     res.status(201).json(result)
   } catch (e) { await client.query('ROLLBACK'); next(e) }

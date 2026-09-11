@@ -338,7 +338,13 @@ window.updateStatus = async (id) => {
 }
 
 window.openPayment = async (id, total, paid) => {
-  const accounts = await api('/finance/accounts')
+  try {
+    const [accounts, supData] = await Promise.all([api('/finance/accounts'), api('/suppliers')])
+    const suppliers = Array.isArray(supData) ? supData : (supData?.items || [])
+    const kalan = Math.max(0, total - paid)
+    window.__paymentKalan = kalan
+    window.__paymentSuppliers = suppliers
+
   openModal(`
     <div class="modal-header">
       <h3>Ödeme Ekle — Sipariş #${id}</h3>
@@ -348,17 +354,35 @@ window.openPayment = async (id, total, paid) => {
       <div style="background:var(--surface-2);border-radius:8px;padding:10px 14px;margin-bottom:14px">
         <span>Toplam: <b>${money(total)}</b></span>
         <span style="margin:0 12px">Ödenen: <b class="money-pos">${money(paid)}</b></span>
-        <span>Kalan: <b class="money-neg">${money(total-paid)}</b></span>
+        <span>Kalan: <b class="money-neg" id="p-kalan-display">${money(kalan)}</b></span>
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label class="form-label">Ödeme Yöntemi *</label>
+        <select id="p-method" class="form-control" onchange="onPaymentMethodChange()">
+          <option value="account">Hesaba Tahsilat (Banka / Kasa)</option>
+          <option value="direct_to_supplier">Tedarikçiye Doğrudan Ödeme</option>
+        </select>
       </div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Tutar *</label>
-          <input id="p-amount" class="form-control" type="number" placeholder="0" value="${Math.max(0,total-paid)}" />
+          <input id="p-amount" class="form-control" type="number" step="0.01" placeholder="0" value="${kalan}" oninput="onPaymentAmountInput()" />
+          <div id="p-limit-hint" style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">Maksimum: ${money(kalan)}</div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="p-account-wrap">
           <label class="form-label">Hesap *</label>
           <select id="p-account" class="form-control">
             ${accounts.map(a=>`<option value="${a.id}">${a.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group" id="p-supplier-wrap" style="display:none">
+          <label class="form-label">Tedarikçi (Malzeme) *</label>
+          <select id="p-supplier" class="form-control" onchange="onPaymentSupplierChange()">
+            <option value="">Seçiniz</option>
+            ${suppliers.map(s => {
+              const debt = parseFloat(s.total_debt) || 0
+              return `<option value="${s.id}" data-debt="${debt}">${s.name} (Borç: ${money(debt)})</option>`
+            }).join('')}
           </select>
         </div>
       </div>
@@ -372,15 +396,96 @@ window.openPayment = async (id, total, paid) => {
       <button class="btn btn-primary" onclick="savePayment(${id})">Kaydet</button>
     </div>
   `)
+  } catch(e) { toast(e.message, 'error') }
+}
+
+window.onPaymentMethodChange = () => {
+  const method = document.getElementById('p-method').value
+  const accWrap = document.getElementById('p-account-wrap')
+  const supWrap = document.getElementById('p-supplier-wrap')
+  if (method === 'direct_to_supplier') {
+    accWrap.style.display = 'none'
+    supWrap.style.display = 'block'
+    onPaymentSupplierChange()
+  } else {
+    accWrap.style.display = 'block'
+    supWrap.style.display = 'none'
+    const kalan = window.__paymentKalan || 0
+    document.getElementById('p-limit-hint').textContent = `Maksimum: ${money(kalan)}`
+  }
+}
+
+window.onPaymentSupplierChange = () => {
+  const supSel = document.getElementById('p-supplier')
+  const selectedOpt = supSel.options[supSel.selectedIndex]
+  const supDebt = parseFloat(selectedOpt?.dataset?.debt || 0)
+  const kalan = window.__paymentKalan || 0
+  const maxAllowed = Math.min(kalan, supDebt)
+  const hintEl = document.getElementById('p-limit-hint')
+  if (!supSel.value) {
+    hintEl.textContent = 'Önce tedarikçi seçiniz'
+    return
+  }
+  hintEl.textContent = `Tedarikçi borcu: ${money(supDebt)} · Maksimum tahsilat: ${money(maxAllowed)}`
+  const amtInput = document.getElementById('p-amount')
+  if (parseFloat(amtInput.value) > maxAllowed) {
+    amtInput.value = maxAllowed > 0 ? maxAllowed : 0
+  }
+}
+
+window.onPaymentAmountInput = () => {
+  const method = document.getElementById('p-method')?.value
+  const amt = parseFloat(document.getElementById('p-amount')?.value || 0)
+  const kalan = window.__paymentKalan || 0
+  if (method === 'direct_to_supplier') {
+    const supSel = document.getElementById('p-supplier')
+    const selectedOpt = supSel?.options[supSel.selectedIndex]
+    const supDebt = parseFloat(selectedOpt?.dataset?.debt || 0)
+    const maxAllowed = Math.min(kalan, supDebt)
+    if (amt > maxAllowed + 0.005) {
+      document.getElementById('p-limit-hint').innerHTML = `<span style="color:var(--red)">Uyarı: Girilen tutar limiti aşıyor (Maks: ${money(maxAllowed)})</span>`
+    } else {
+      document.getElementById('p-limit-hint').innerHTML = `Tedarikçi borcu: ${money(supDebt)} · Maksimum tahsilat: ${money(maxAllowed)}`
+    }
+  } else {
+    if (amt > kalan + 0.005) {
+      document.getElementById('p-limit-hint').innerHTML = `<span style="color:var(--red)">Uyarı: Açık alacak aşılıyor (Maks: ${money(kalan)})</span>`
+    } else {
+      document.getElementById('p-limit-hint').innerHTML = `Maksimum: ${money(kalan)}`
+    }
+  }
 }
 
 window.savePayment = async (id) => {
+  const method = document.getElementById('p-method').value
   const amount = parseFloat(document.getElementById('p-amount').value)
-  const account_id = document.getElementById('p-account').value
   const description = document.getElementById('p-desc').value
+  const kalan = window.__paymentKalan || 0
+
   if (!amount || amount <= 0) { toast('Geçerli tutar girin','error'); return }
+  if (amount > kalan + 0.005) { toast(`Tutar siparişin kalan tutarını (${money(kalan)}) aşamaz`,'error'); return }
+
+  const body = { amount, description, payment_method: method }
+
+  if (method === 'direct_to_supplier') {
+    const supplier_id = document.getElementById('p-supplier').value
+    if (!supplier_id) { toast('Lütfen tedarikçi seçin','error'); return }
+    const supSel = document.getElementById('p-supplier')
+    const selectedOpt = supSel.options[supSel.selectedIndex]
+    const supDebt = parseFloat(selectedOpt?.dataset?.debt || 0)
+    if (amount > supDebt + 0.005) {
+      toast(`Tutar tedarikçinin mevcut borcunu (${money(supDebt)}) aşamaz`,'error')
+      return
+    }
+    body.supplier_id = parseInt(supplier_id)
+  } else {
+    const account_id = document.getElementById('p-account').value
+    if (!account_id) { toast('Lütfen hesap seçin','error'); return }
+    body.account_id = account_id
+  }
+
   try {
-    await api(`/orders/${id}/payments`, { method:'POST', body:{ amount, account_id, description } })
+    await api(`/orders/${id}/payments`, { method:'POST', body })
     toast('Ödeme kaydedildi')
     closeModal()
     load()

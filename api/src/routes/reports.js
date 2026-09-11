@@ -61,12 +61,16 @@ router.get('/summary', async (req, res, next) => {
              WHERE deleted_at IS NULL AND status != 'cancelled'
                AND order_date >= NOW() - INTERVAL '1 day' * $1`, [days]),
 
-      // Tahsilat = kasaya giren customer_payment hareketleri (transaction_date bazlı)
-      query(`SELECT COALESCE(SUM(amount),0) AS total
-             FROM transactions
-             WHERE transaction_type = 'customer_payment'
-               AND amount > 0
-               AND transaction_date >= NOW() - INTERVAL '1 day' * $1`, [days]),
+      // Tahsilat = kasaya giren customer_payment hareketleri + doğrudan tedarikçiye ödemeler
+      query(`SELECT (
+               COALESCE((SELECT SUM(amount) FROM transactions
+                         WHERE transaction_type = 'customer_payment' AND amount > 0
+                           AND transaction_date >= NOW() - INTERVAL '1 day' * $1), 0)
+               +
+               COALESCE((SELECT SUM(amount) FROM customer_payments
+                         WHERE method = 'direct_to_supplier'
+                           AND paid_at >= NOW() - INTERVAL '1 day' * $1), 0)
+             ) AS total`, [days]),
 
       // CHK-R06: Yeni müşteri = o dönemde ilk siparişini veren müşteri sayısı
       query(`SELECT COUNT(*)::int AS cnt FROM (
