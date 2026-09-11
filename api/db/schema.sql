@@ -686,3 +686,76 @@ BEGIN
     ON CONFLICT (session_id, section, ref_key) DO NOTHING;
   END IF;
 END $$;
+
+-- ===========================================================================
+-- SİPARİŞ NUMARATÖRÜ (ORDER NUMBER GENERATOR)
+-- Dönem bazlı (YYMM-NNN) atomik ve eşzamanlılığa dayanıklı sipariş sayacı
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS order_sequences (
+  period   VARCHAR(4) PRIMARY KEY, -- '2609' (YYMM)
+  last_val INT NOT NULL DEFAULT 0
+);
+
+-- Mevcut siparişlerden dönem bazında en yüksek sıra numarasını aktar (idempotent)
+INSERT INTO order_sequences (period, last_val)
+SELECT
+  split_part(order_no, '-', 1) AS period,
+  MAX(split_part(order_no, '-', 2)::int) AS last_val
+FROM orders
+WHERE order_no ~ '^[0-9]{4}-[0-9]+$'
+GROUP BY split_part(order_no, '-', 1)
+ON CONFLICT (period) DO UPDATE
+  SET last_val = GREATEST(order_sequences.last_val, EXCLUDED.last_val);
+
+-- Atomik numara üretici fonksiyon (Europe/Istanbul saat dilimi esaslı)
+CREATE OR REPLACE FUNCTION next_order_no(p_order_date TIMESTAMPTZ DEFAULT NOW())
+RETURNS VARCHAR(50) AS $$
+DECLARE
+  v_period VARCHAR(4);
+  v_seq    INT;
+BEGIN
+  v_period := TO_CHAR(COALESCE(p_order_date, NOW()) AT TIME ZONE 'Europe/Istanbul', 'YYMM');
+
+  INSERT INTO order_sequences (period, last_val)
+  VALUES (v_period, 1)
+  ON CONFLICT (period) DO UPDATE
+    SET last_val = order_sequences.last_val + 1
+  RETURNING last_val INTO v_seq;
+
+  RETURN v_period || '-' || LPAD(v_seq::text, 3, '0');
+END;
+$$ LANGUAGE plpgsql;
+
+-- Otomatik atama ve sayaç senkronizasyon trigger'ı
+CREATE OR REPLACE FUNCTION set_order_no_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- 1. Açıkça formatlı numara verilmişse (ör. import): numarayı koru, sayacı ileri taşı
+  IF NEW.order_no IS NOT NULL AND NEW.order_no ~ '^[0-9]{4}-[0-9]+$' THEN
+    INSERT INTO order_sequences (period, last_val)
+    VALUES (
+      split_part(NEW.order_no, '-', 1),
+      split_part(NEW.order_no, '-', 2)::int
+    )
+    ON CONFLICT (period) DO UPDATE
+      SET last_val = GREATEST(order_sequences.last_val, EXCLUDED.last_val);
+
+  -- 2. Numara boşsa: Europe/Istanbul bazlı atomik yeni numara ata
+  ELSIF NEW.order_no IS NULL OR TRIM(NEW.order_no) = '' THEN
+    NEW.order_no := next_order_no(COALESCE(NEW.order_date, NOW()));
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_orders_order_no ON orders;
+CREATE TRIGGER trg_orders_order_no
+  BEFORE INSERT ON orders
+  FOR EACH ROW
+  EXECUTE FUNCTION set_order_no_trigger();
+
+-- Global tekillik koruması (iptal edilmiş siparişlerin numaraları da dahil korunur)
+CREATE UNIQUE INDEX IF NOT EXISTS orders_order_no_uniq
+  ON orders (order_no) WHERE order_no IS NOT NULL;
