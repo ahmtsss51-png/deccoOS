@@ -18,6 +18,7 @@ import settingsRouter from './routes/settings.js'
 import reportsRouter from './routes/reports.js'
 import authRouter from './routes/auth.js'
 import openingRouter from './routes/opening.js'
+import webhooksRouter from './routes/webhooks.js'
 import { requireOpened } from './opening-guard.js'
 import jwt from 'jsonwebtoken'
 
@@ -39,7 +40,13 @@ const app = express()
 const PORT = process.env.PORT || 3000
 
 app.use(cors())
-app.use(express.json())
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    if (req.originalUrl?.startsWith('/api/webhooks')) {
+      req.rawBody = buf
+    }
+  }
+}))
 
 // Health check
 app.get('/health', async (_req, res) => {
@@ -53,6 +60,9 @@ app.get('/health', async (_req, res) => {
 
 // Auth routes — korumasız
 app.use('/api/auth', authRouter)
+
+// Webhook routes — JWT korumasız (kendi HMAC imza doğrulamasını yapar)
+app.use('/api/webhooks', webhooksRouter)
 
 // Tüm diğer /api/* rotaları token gerektirir
 app.use('/api', requireAuth)

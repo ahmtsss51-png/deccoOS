@@ -759,3 +759,25 @@ CREATE TRIGGER trg_orders_order_no
 -- Global tekillik koruması (iptal edilmiş siparişlerin numaraları da dahil korunur)
 CREATE UNIQUE INDEX IF NOT EXISTS orders_order_no_uniq
   ON orders (order_no) WHERE order_no IS NOT NULL;
+
+-- ===========================================================================
+-- DIŞ ENTEGRASYON OLAY DEFTERİ (INTEGRATION EVENTS)
+-- Provider-agnostic, pasif webhook event ledger
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS integration_events (
+  id            BIGSERIAL PRIMARY KEY,
+  provider      VARCHAR(50) NOT NULL,
+  event_key     VARCHAR(255) NOT NULL,
+  event_type    VARCHAR(100),
+  payload       JSONB NOT NULL,
+  body_sha256   VARCHAR(64),
+  status        VARCHAR(30) NOT NULL DEFAULT 'received',
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processed_at  TIMESTAMPTZ,
+  error_message TEXT,
+  CONSTRAINT integration_events_provider_event_key_uniq UNIQUE (provider, event_key)
+);
+
+CREATE INDEX IF NOT EXISTS integration_events_provider_status_idx
+  ON integration_events (provider, status, received_at DESC);
