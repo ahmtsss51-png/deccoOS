@@ -1,8 +1,14 @@
+import crypto from 'crypto'
 import { Router } from 'express'
 import { pool, query } from '../db.js'
 import { normalizePhone, PHONE_CANON_SQL } from './customers.js'
 import { applyCustomerPayment } from './finance.js'
-import { queryPaytrStatus } from '../services/paytr.js'
+import {
+  queryPaytrStatus,
+  createPaytrLink,
+  validatePaytrCallbackUrl,
+  centsToDecimalString
+} from '../services/paytr.js'
 
 const router = Router()
 
@@ -902,6 +908,258 @@ router.get('/paytr/status/:merchantOid', async (req, res, next) => {
     }
 
     res.json(result.data)
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/paytr/orders/:orderId/create-link
+ * Decco siparişine ait PayTR ödeme linki oluşturur.
+ * DB transaction ile uzak ağ çağrısı birbirinden ayrılmıştır (State Machine: creating -> pending / create_unknown / failed).
+ * Finansal mutasyon KESİNLİKLE YAPMAZ.
+ */
+router.post('/paytr/orders/:orderId/create-link', async (req, res, next) => {
+  try {
+    const orderId = parseInt(req.params.orderId, 10)
+    if (!Number.isInteger(orderId) || orderId <= 0) {
+      return res.status(400).json({ error: 'Geçersiz orderId', code: 'INVALID_ORDER_ID' })
+    }
+
+    // 1. max_installment doğrulaması (PayTR kuralı: 1..12 tam sayı, varsayılan: 1)
+    let maxInstallment = 1
+    if (req.body?.max_installment !== undefined && req.body?.max_installment !== null && req.body?.max_installment !== '') {
+      const parsed = Number(req.body.max_installment)
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+        return res.status(400).json({
+          error: 'max_installment 1 ile 12 arasında bir tam sayı olmalıdır',
+          code: 'INVALID_MAX_INSTALLMENT'
+        })
+      }
+      maxInstallment = parsed
+    }
+
+    // 2. Pre-flight Config Doğrulaması (DB rezervasyonu yapılmadan ÖNCE kontrol edilir)
+    const merchantId = process.env.PAYTR_MERCHANT_ID
+    const merchantKey = process.env.PAYTR_MERCHANT_KEY
+    const merchantSalt = process.env.PAYTR_MERCHANT_SALT
+
+    if (!merchantId || !merchantKey || !merchantSalt) {
+      return res.status(500).json({
+        error: 'PayTR API kimlik bilgileri yapılandırılmamış',
+        code: 'PAYTR_CREDENTIALS_MISSING'
+      })
+    }
+
+    const configuredCallbackUrl =
+      process.env.PAYTR_LINK_CALLBACK_URL ||
+      (process.env.NODE_ENV !== 'production' ? req.headers['x-paytr-test-callback-url'] : null)
+
+    const callbackValidation = validatePaytrCallbackUrl(configuredCallbackUrl)
+    if (!callbackValidation.valid) {
+      return res.status(400).json({
+        error: callbackValidation.message,
+        code: callbackValidation.error_code
+      })
+    }
+    const callbackLink = callbackValidation.url
+
+    // 3. Kısa DB Rezervasyonu (Adım 1 - Order Lock & Creating State)
+    const client = await pool.connect()
+    let linkId
+    let callbackId
+    let requestedCents
+    let requestedAmountStr
+    let orderNo
+
+    try {
+      await client.query('BEGIN')
+
+      const { rows: orderRows } = await client.query(
+        `SELECT id, order_no, total_amount, paid_amount, status, deleted_at
+         FROM orders
+         WHERE id = $1
+         FOR UPDATE`,
+        [orderId]
+      )
+
+      if (orderRows.length === 0 || orderRows[0].deleted_at) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Sipariş bulunamadı', code: 'ORDER_NOT_FOUND' })
+      }
+
+      const order = orderRows[0]
+      if (order.status === 'cancelled') {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'İptal edilmiş siparişe ödeme linki açılamaz', code: 'ORDER_CANCELLED' })
+      }
+
+      orderNo = order.order_no
+
+      // Exact cents hesabı: total_amount - paid_amount
+      const totalCents = parseDecimalToCents(order.total_amount)
+      const paidCents = parseDecimalToCents(order.paid_amount || '0.00')
+
+      if (totalCents == null || paidCents == null) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({ error: 'Sipariş tutarı hesaplanamadı', code: 'INVALID_ORDER_TOTAL' })
+      }
+
+      requestedCents = totalCents - paidCents
+      if (requestedCents <= 0) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Siparişin açık bakiyesi bulunmamaktadır (zaten ödendi)', code: 'ORDER_ALREADY_PAID' })
+      }
+
+      requestedAmountStr = centsToDecimalString(requestedCents)
+
+      // Aktif link kontrolü (creating, pending, create_unknown)
+      const { rows: activeLinks } = await client.query(
+        `SELECT id, status
+         FROM paytr_payment_links
+         WHERE order_id = $1 AND status IN ('creating', 'pending', 'create_unknown')
+         FOR UPDATE`,
+        [orderId]
+      )
+
+      if (activeLinks.length > 0) {
+        await client.query('ROLLBACK')
+        return res.status(409).json({
+          error: `Sipariş için zaten aktif bir ödeme linki mevcut (#${activeLinks[0].id} - ${activeLinks[0].status})`,
+          code: 'ACTIVE_LINK_EXISTS',
+          link_id: activeLinks[0].id,
+          status: activeLinks[0].status
+        })
+      }
+
+      callbackId = crypto.randomBytes(24).toString('hex')
+
+      const { rows: insertedRows } = await client.query(
+        `INSERT INTO paytr_payment_links (order_id, callback_id, requested_amount, currency, status)
+         VALUES ($1, $2, $3, 'TL', 'creating')
+         RETURNING id`,
+        [orderId, callbackId, requestedAmountStr]
+      )
+      linkId = insertedRows[0].id
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (err.code === '23505') {
+        return res.status(409).json({
+          error: 'Sipariş için aktif bir link zaten oluşturuluyor veya mevcut',
+          code: 'ACTIVE_LINK_EXISTS'
+        })
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+
+    // 4. Uzak PayTR HTTP Çağrısı (Adım 2 - DB bağlantısı ve kilit tutulmaz)
+    const linkName = `Decco Sipariş ${orderNo}`
+    const createRes = await createPaytrLink({
+      name: linkName,
+      price: String(requestedCents),
+      currency: 'TL',
+      max_installment: String(maxInstallment),
+      link_type: 'product',
+      lang: 'tr',
+      min_count: '1',
+      max_count: '1',
+      callback_link: callbackLink,
+      callback_id: callbackId,
+      debug_on: '1'
+    })
+
+    // 5. Sonuç Çözümleme & Callback Yarışı Koruması (Adım 3 - Kısa DB Güncellemesi)
+    const finClient = await pool.connect()
+    try {
+      await finClient.query('BEGIN')
+
+      const { rows: curRows } = await finClient.query(
+        `SELECT id, status, paytr_link_id, link_url
+         FROM paytr_payment_links
+         WHERE id = $1
+         FOR UPDATE`,
+        [linkId]
+      )
+
+      if (curRows.length === 0) {
+        await finClient.query('COMMIT')
+        return res.status(500).json({ error: 'Oluşturulan link kaydı bulunamadı', code: 'LINK_RECORD_NOT_FOUND' })
+      }
+
+      const currentLink = curRows[0]
+
+      if (createRes.ok) {
+        const { paytr_link_id, link_url } = createRes.data
+
+        if (currentLink.status === 'paid') {
+          // Callback Create API yanıtından önce gelip linki paid yapmışsa status'ü pendinge DÜŞÜRME!
+          await finClient.query(
+            `UPDATE paytr_payment_links
+             SET paytr_link_id = COALESCE(paytr_link_id, $1),
+                 link_url = COALESCE(link_url, $2)
+             WHERE id = $3`,
+            [paytr_link_id, link_url, linkId]
+          )
+        } else {
+          // Normal başarılı geçiş: creating -> pending
+          await finClient.query(
+            `UPDATE paytr_payment_links
+             SET status = 'pending',
+                 paytr_link_id = $1,
+                 link_url = $2
+             WHERE id = $3`,
+            [paytr_link_id, link_url, linkId]
+          )
+        }
+
+        await finClient.query('COMMIT')
+
+        return res.status(201).json({
+          ok: true,
+          link_id: linkId,
+          paytr_link_id,
+          link_url,
+          requested_amount: requestedAmountStr,
+          currency: 'TL',
+          status: currentLink.status === 'paid' ? 'paid' : 'pending',
+          callback_id: callbackId
+        })
+      } else {
+        // Hata durumu: Açık ret ('failed') vs Belirsizlik ('create_unknown')
+        const newStatus = createRes.error_type === 'rejected' ? 'failed' : 'create_unknown'
+
+        if (currentLink.status === 'paid') {
+          // Callback ödendi dediyse paid korunsun
+        } else {
+          await finClient.query(
+            `UPDATE paytr_payment_links
+             SET status = $1
+             WHERE id = $2`,
+            [newStatus, linkId]
+          )
+        }
+
+        await finClient.query('COMMIT')
+
+        const httpStatus = createRes.error_type === 'rejected' ? 422 : 502
+        return res.status(httpStatus).json({
+          error: createRes.reason || createRes.message || 'PayTR link oluşturulamadı',
+          code: createRes.error_code,
+          status: currentLink.status === 'paid' ? 'paid' : newStatus,
+          link_id: linkId
+        })
+      }
+    } catch (err) {
+      await finClient.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      finClient.release()
+    }
+
   } catch (err) {
     next(err)
   }

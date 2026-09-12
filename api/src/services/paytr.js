@@ -195,3 +195,277 @@ export async function queryPaytrStatus(merchantOid, options = {}) {
     message: `PayTR beklenmeyen durum kodu döndü: ${rawJson?.status}`
   }
 }
+
+/**
+ * Exact integer cents to 2-decimal string helper.
+ * Avoids floating-point division (cents / 100).
+ * e.g. 89900 -> "899.00", 50 -> "0.50", 7 -> "0.07".
+ */
+export function centsToDecimalString(cents) {
+  if (!Number.isSafeInteger(cents) || cents < 0) {
+    throw new Error('INVALID_CENTS_VALUE')
+  }
+  const s = String(cents)
+  if (s.length <= 2) {
+    return `0.${s.padStart(2, '0')}`
+  }
+  const intPart = s.slice(0, -2)
+  const decPart = s.slice(-2)
+  return `${intPart}.${decPart}`
+}
+
+/**
+ * Validates PayTR callback URL according to official PayTR Link API specifications:
+ * - Must start with http:// or https://
+ * - Must NOT be localhost, 127.0.0.1, ::1, or *.localhost
+ * - Must NOT contain a port (e.g. :3000)
+ */
+export function validatePaytrCallbackUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') {
+    return { valid: false, error_code: 'PAYTR_CALLBACK_URL_MISSING', message: 'PAYTR_LINK_CALLBACK_URL yapılandırılmamış' }
+  }
+  const s = urlStr.trim()
+  if (!s) {
+    return { valid: false, error_code: 'PAYTR_CALLBACK_URL_MISSING', message: 'PAYTR_LINK_CALLBACK_URL boş olamaz' }
+  }
+
+  let parsed
+  try {
+    parsed = new URL(s)
+  } catch {
+    return { valid: false, error_code: 'INVALID_CALLBACK_URL_FORMAT', message: 'Geçersiz callback URL formatı' }
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { valid: false, error_code: 'INVALID_CALLBACK_URL_PROTOCOL', message: 'Callback URL http:// veya https:// ile başlamalıdır' }
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '::1' ||
+    hostname === '[::1]' ||
+    hostname.endsWith('.localhost')
+  ) {
+    return { valid: false, error_code: 'CALLBACK_URL_LOCALHOST_NOT_ALLOWED', message: 'PayTR callback URL localhost veya yerel IP olamaz' }
+  }
+
+  if (parsed.port && parsed.port !== '') {
+    return { valid: false, error_code: 'CALLBACK_URL_PORT_NOT_ALLOWED', message: 'PayTR callback URL port içeremez' }
+  }
+
+  return { valid: true, url: s }
+}
+
+/**
+ * Validates that PayTR created link URL is an authentic PayTR link.
+ * Must have protocol https:, hostname www.paytr.com, and pathname starting with /link/.
+ */
+export function validatePaytrLinkUrl(linkUrl) {
+  if (!linkUrl || typeof linkUrl !== 'string') return false
+  try {
+    const parsed = new URL(linkUrl)
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname === 'www.paytr.com' &&
+      parsed.pathname.startsWith('/link/')
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Generates PayTR Link Create HMAC-SHA256 token.
+ * Token formula: name + price + currency + max_installment + link_type + lang + min_count + merchant_salt
+ * Key: merchant_key, Base64 digest.
+ */
+export function generatePaytrLinkCreateToken({
+  name,
+  price,
+  currency,
+  maxInstallment,
+  linkType,
+  lang,
+  minCount,
+  merchantSalt,
+  merchantKey
+}) {
+  if (
+    !name ||
+    !price ||
+    !currency ||
+    !maxInstallment ||
+    !linkType ||
+    !lang ||
+    !minCount ||
+    !merchantSalt ||
+    !merchantKey
+  ) {
+    throw new Error('PAYTR_LINK_CREATE_TOKEN_PARAMS_INCOMPLETE')
+  }
+
+  const required = `${name}${price}${currency}${maxInstallment}${linkType}${lang}${minCount}`
+  return crypto.createHmac('sha256', merchantKey).update(required + merchantSalt).digest('base64')
+}
+
+/**
+ * Executes a PayTR Link Create API request (POST https://www.paytr.com/odeme/api/link/create).
+ * Distinguishes between explicit PayTR rejections (error_type: 'rejected')
+ * and ambiguous errors (error_type: 'uncertain', e.g. timeout, network failure, malformed response).
+ */
+export async function createPaytrLink(params, options = {}) {
+  const merchantId = options.merchantId !== undefined ? options.merchantId : process.env.PAYTR_MERCHANT_ID
+  const merchantKey = options.merchantKey !== undefined ? options.merchantKey : process.env.PAYTR_MERCHANT_KEY
+  const merchantSalt = options.merchantSalt !== undefined ? options.merchantSalt : process.env.PAYTR_MERCHANT_SALT
+  const endpoint = options.endpoint || 'https://www.paytr.com/odeme/api/link/create'
+  const timeoutMs = options.timeoutMs || 15000
+  const fetchFn = options.fetchFn || fetch
+
+  if (!merchantId || !merchantKey || !merchantSalt) {
+    return {
+      ok: false,
+      error_type: 'rejected',
+      error_code: 'PAYTR_CREDENTIALS_MISSING',
+      message: 'PayTR API kimlik bilgileri yapılandırılmamış'
+    }
+  }
+
+  const {
+    name,
+    price,
+    currency = 'TL',
+    max_installment = '1',
+    link_type = 'product',
+    lang = 'tr',
+    min_count = '1',
+    max_count = '1',
+    callback_link,
+    callback_id,
+    debug_on = '1'
+  } = params
+
+  let paytrToken
+  try {
+    paytrToken = generatePaytrLinkCreateToken({
+      name,
+      price: String(price),
+      currency: String(currency),
+      maxInstallment: String(max_installment),
+      linkType: String(link_type),
+      lang: String(lang),
+      minCount: String(min_count),
+      merchantSalt,
+      merchantKey
+    })
+  } catch (err) {
+    return {
+      ok: false,
+      error_type: 'rejected',
+      error_code: 'TOKEN_GENERATION_FAILED',
+      message: 'PayTR link tokenı oluşturulamadı: ' + err.message
+    }
+  }
+
+  const formParams = new URLSearchParams({
+    merchant_id: String(merchantId),
+    name: String(name),
+    price: String(price),
+    currency: String(currency),
+    max_installment: String(max_installment),
+    link_type: String(link_type),
+    lang: String(lang),
+    min_count: String(min_count),
+    max_count: String(max_count),
+    callback_link: String(callback_link),
+    callback_id: String(callback_id),
+    debug_on: String(debug_on),
+    paytr_token: paytrToken
+  })
+
+  let response
+  try {
+    response = await fetchFn(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formParams.toString(),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      return {
+        ok: false,
+        error_type: 'uncertain',
+        error_code: 'UPSTREAM_TIMEOUT',
+        message: 'PayTR Link Create çağrısı zaman aşımına uğradı'
+      }
+    }
+    return {
+      ok: false,
+      error_type: 'uncertain',
+      error_code: 'UPSTREAM_NETWORK_ERROR',
+      message: 'PayTR sunucusuna bağlanılamadı: ' + (err.message || 'Ağ hatası')
+    }
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error_type: 'uncertain',
+      error_code: 'UPSTREAM_HTTP_ERROR',
+      status_code: response.status,
+      message: `PayTR sunucusu HTTP ${response.status} hatası döndü`
+    }
+  }
+
+  let rawJson
+  try {
+    rawJson = await response.json()
+  } catch {
+    return {
+      ok: false,
+      error_type: 'uncertain',
+      error_code: 'INVALID_UPSTREAM_RESPONSE',
+      message: 'PayTR sunucusu geçersiz yanıt formatı döndü'
+    }
+  }
+
+  if (rawJson?.status === 'error' || rawJson?.status === 'failed') {
+    return {
+      ok: false,
+      error_type: 'rejected',
+      error_code: 'PAYTR_CREATE_ERROR',
+      reason: rawJson.reason || 'PayTR link oluşturma isteğini reddetti'
+    }
+  }
+
+  if (rawJson?.status === 'success') {
+    const linkId = rawJson.id != null ? String(rawJson.id) : null
+    const linkUrl = rawJson.link != null ? String(rawJson.link) : null
+
+    if (!linkId || !linkUrl || !validatePaytrLinkUrl(linkUrl)) {
+      return {
+        ok: false,
+        error_type: 'uncertain',
+        error_code: 'INVALID_LINK_URL',
+        message: 'PayTR geçersiz veya güvensiz bir link URL döndü'
+      }
+    }
+
+    return {
+      ok: true,
+      data: {
+        paytr_link_id: linkId,
+        link_url: linkUrl
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    error_type: 'uncertain',
+    error_code: 'UNEXPECTED_PAYTR_STATUS',
+    message: `PayTR beklenmeyen durum kodu döndü: ${rawJson?.status}`
+  }
+}

@@ -869,12 +869,28 @@ CREATE TABLE IF NOT EXISTS paytr_payment_links (
   CONSTRAINT paytr_payment_links_callback_not_empty CHECK (length(trim(callback_id)) > 0),
   CONSTRAINT paytr_payment_links_callback_alphanumeric CHECK (callback_id ~ '^[a-zA-Z0-9]+$'),
   CONSTRAINT paytr_payment_links_merchant_oid_format CHECK (merchant_oid IS NULL OR (length(trim(merchant_oid)) > 0 AND merchant_oid = trim(merchant_oid))),
-  CONSTRAINT paytr_payment_links_status_check CHECK (status IN ('pending', 'paid', 'cancelled', 'expired')),
+  CONSTRAINT paytr_payment_links_status_check CHECK (status IN ('creating', 'pending', 'create_unknown', 'paid', 'cancelled', 'expired', 'failed')),
   CONSTRAINT paytr_payment_links_currency_check CHECK (currency IN ('TL', 'USD', 'EUR', 'GBP', 'RUB'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_paytr_payment_links_order_id ON paytr_payment_links(order_id);
 CREATE INDEX IF NOT EXISTS idx_paytr_payment_links_status ON paytr_payment_links(status);
+
+-- Idempotent constraint migration for existing table
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'paytr_payment_links_status_check'
+  ) THEN
+    ALTER TABLE paytr_payment_links DROP CONSTRAINT paytr_payment_links_status_check;
+  END IF;
+  ALTER TABLE paytr_payment_links ADD CONSTRAINT paytr_payment_links_status_check
+    CHECK (status IN ('creating', 'pending', 'create_unknown', 'paid', 'cancelled', 'expired', 'failed'));
+END $$;
+
+-- Sipariş başına aynı anda yalnızca TEK BİR aktif link (creating, pending, create_unknown) olabilir
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paytr_payment_links_active_order
+  ON paytr_payment_links (order_id) WHERE status IN ('creating', 'pending', 'create_unknown');
 
 -- ===========================================================================
 -- ÖDEME DIŞ SİSTEM REFERANSLARI (PAYMENT EXTERNAL REFS)
