@@ -845,3 +845,55 @@ CREATE TABLE IF NOT EXISTS order_addresses (
   CONSTRAINT order_addresses_type_check CHECK (address_type IN ('shipping', 'billing')),
   CONSTRAINT order_addresses_order_type_uniq UNIQUE (order_id, address_type)
 );
+
+-- ===========================================================================
+-- PAYTR ÖDEME LİNKLERİ (PAYTR PAYMENT LINKS)
+-- Decco OS siparişlerine ait PayTR ödeme linklerini ve durumlarını takip eder
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS paytr_payment_links (
+  id                   BIGSERIAL PRIMARY KEY,
+  order_id             INT NOT NULL REFERENCES orders(id),
+  callback_id          VARCHAR(64) NOT NULL UNIQUE,
+  paytr_link_id        VARCHAR(100) NULL UNIQUE,
+  link_url             TEXT NULL,
+  requested_amount     NUMERIC(12,2) NOT NULL,
+  currency             VARCHAR(10) NOT NULL DEFAULT 'TL',
+  status               VARCHAR(30) NOT NULL DEFAULT 'pending',
+  merchant_oid         VARCHAR(255) NULL UNIQUE,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at           TIMESTAMPTZ NULL,
+  callback_received_at TIMESTAMPTZ NULL,
+  paid_at              TIMESTAMPTZ NULL,
+  CONSTRAINT paytr_payment_links_amount_pos CHECK (requested_amount > 0),
+  CONSTRAINT paytr_payment_links_callback_not_empty CHECK (length(trim(callback_id)) > 0),
+  CONSTRAINT paytr_payment_links_callback_alphanumeric CHECK (callback_id ~ '^[a-zA-Z0-9]+$'),
+  CONSTRAINT paytr_payment_links_merchant_oid_format CHECK (merchant_oid IS NULL OR (length(trim(merchant_oid)) > 0 AND merchant_oid = trim(merchant_oid))),
+  CONSTRAINT paytr_payment_links_status_check CHECK (status IN ('pending', 'paid', 'cancelled', 'expired')),
+  CONSTRAINT paytr_payment_links_currency_check CHECK (currency IN ('TL', 'USD', 'EUR', 'GBP', 'RUB'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_payment_links_order_id ON paytr_payment_links(order_id);
+CREATE INDEX IF NOT EXISTS idx_paytr_payment_links_status ON paytr_payment_links(status);
+
+-- ===========================================================================
+-- ÖDEME DIŞ SİSTEM REFERANSLARI (PAYMENT EXTERNAL REFS)
+-- Tahsilat düzeyinde harici işlem kimliklerini (merchant_oid, transaction_id vb.) bağlar
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS payment_external_refs (
+  id             BIGSERIAL PRIMARY KEY,
+  payment_id     INT NOT NULL REFERENCES customer_payments(id),
+  provider       VARCHAR(50) NOT NULL,
+  reference_type VARCHAR(50) NOT NULL,
+  external_id    VARCHAR(255) NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT payment_external_refs_provider_not_empty CHECK (length(trim(provider)) > 0),
+  CONSTRAINT payment_external_refs_ref_type_not_empty CHECK (length(trim(reference_type)) > 0),
+  CONSTRAINT payment_external_refs_ext_id_not_empty CHECK (length(trim(external_id)) > 0),
+  CONSTRAINT payment_external_refs_provider_canonical CHECK (provider = lower(trim(provider))),
+  CONSTRAINT payment_external_refs_ref_type_canonical CHECK (reference_type = lower(trim(reference_type))),
+  CONSTRAINT payment_external_refs_ext_id_canonical CHECK (external_id = trim(external_id)),
+  CONSTRAINT payment_external_refs_provider_ref_ext_uniq UNIQUE (provider, reference_type, external_id),
+  CONSTRAINT payment_external_refs_payment_provider_ref_uniq UNIQUE (payment_id, provider, reference_type)
+);
