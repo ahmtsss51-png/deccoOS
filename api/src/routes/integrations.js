@@ -3568,6 +3568,7 @@ router.get('/whatsapp/messages', async (req, res, next) => {
               m.sender_name, m.message_timestamp, m.message_type, m.text,
               m.direction, m.order_id, m.raw_message, m.created_at,
               o.order_no, o.status AS order_status, o.total_amount AS order_total_amount,
+              o.paid_amount AS order_paid_amount,
               r.customer_id AS direct_customer_id,
               c_direct.name AS direct_customer_name,
               c_direct.phone AS direct_customer_phone
@@ -3633,14 +3634,40 @@ router.get('/whatsapp/messages', async (req, res, next) => {
       const effectiveCustomerId = matchedCustomer?.id || (suggestedCustomers.length === 1 ? suggestedCustomers[0].id : null)
       if (effectiveCustomerId && !row.order_id) {
         const { rows: ordRows } = await query(
-          `SELECT id, order_no, status, total_amount, order_date
+          `SELECT id, order_no, status, total_amount, paid_amount, order_date
            FROM orders
            WHERE customer_id = $1 AND deleted_at IS NULL
            ORDER BY order_date DESC, id DESC
            LIMIT 5`,
           [effectiveCustomerId]
         )
-        candidateOrders = ordRows
+        candidateOrders = ordRows.map(o => {
+          const tot = parseFloat(o.total_amount || 0)
+          const paid = parseFloat(o.paid_amount || 0)
+          const rem = tot - paid
+          let pStatus = 'unpaid'
+          if (rem <= 0.005 && tot > 0) pStatus = 'paid'
+          else if (paid > 0) pStatus = 'partial'
+          return {
+            ...o,
+            payment_status: pStatus
+          }
+        })
+      }
+
+      // Canonical payment status calculation based on live orders data
+      let orderPaymentStatus = null
+      if (row.order_id) {
+        const tot = parseFloat(row.order_total_amount || 0)
+        const paid = parseFloat(row.order_paid_amount || 0)
+        const rem = tot - paid
+        if (rem <= 0.005 && tot > 0) {
+          orderPaymentStatus = 'paid'
+        } else if (paid > 0) {
+          orderPaymentStatus = 'partial'
+        } else {
+          orderPaymentStatus = 'unpaid'
+        }
       }
 
       const item = {
@@ -3657,7 +3684,9 @@ router.get('/whatsapp/messages', async (req, res, next) => {
         order_id: row.order_id ? Number(row.order_id) : null,
         order_no: row.order_no || null,
         order_status: row.order_status || null,
-        order_total_amount: row.order_total_amount || null,
+        order_total_amount: row.order_total_amount != null ? String(row.order_total_amount) : null,
+        order_paid_amount: row.order_paid_amount != null ? String(row.order_paid_amount) : null,
+        order_payment_status: orderPaymentStatus,
         raw_message: row.raw_message,
         match_status: matchStatus,
         matched_customer: matchedCustomer,

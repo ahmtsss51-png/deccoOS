@@ -460,6 +460,131 @@ async function runTests() {
     assert.equal(unlinkRes.body.unlinked, true)
     console.log('✓ Scenario 9 passed: Order linking enforces customer ownership and keeps integration_events immutable.')
 
+    // =========================================================================
+    // SCENARIO 10: Canonical Live Payment Status (Unpaid -> Partial -> Paid)
+    // =========================================================================
+    console.log('\n[Scenario 10] Testing canonical live payment status derivation & re-query reflection...')
+
+    // Link Order A back to Message 1 (total_amount = 2500, paid_amount = 0)
+    await authRequest(`/integrations/whatsapp/messages/${dbMsg1.id}/link-order`, {
+      method: 'POST',
+      body: { order_id: orderAId }
+    })
+
+    // 10a. Unpaid status verification
+    const listUnpaid = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemUnpaid = listUnpaid.body.messages.find(m => m.message_id === msgId1)
+    assert.ok(itemUnpaid, 'itemUnpaid should be found in matched messages')
+    assert.equal(itemUnpaid.order_id, orderAId)
+    assert.equal(itemUnpaid.order_status, 'confirmed', 'Operational status must remain intact (orders.status)')
+    assert.equal(itemUnpaid.order_payment_status, 'unpaid', 'Unpaid order must have order_payment_status = unpaid')
+    assert.equal(parseFloat(itemUnpaid.order_paid_amount || 0), 0)
+
+    // 10b. Partial payment reflection (kapora: e.g. ₺1000 recorded)
+    await query('UPDATE orders SET paid_amount = 1000 WHERE id = $1', [orderAId])
+    const listPartial = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemPartial = listPartial.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemPartial.order_status, 'confirmed', 'Operational status must NOT be modified by payment')
+    assert.equal(itemPartial.order_payment_status, 'partial', 'Partial payment must dynamically reflect as partial')
+    assert.equal(parseFloat(itemPartial.order_paid_amount), 1000)
+
+    // 10c. Full payment reflection (₺2500 total paid)
+    await query('UPDATE orders SET paid_amount = 2500 WHERE id = $1', [orderAId])
+    const listPaid = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemPaid = listPaid.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemPaid.order_status, 'confirmed', 'Operational status remains confirmed')
+    assert.equal(itemPaid.order_payment_status, 'paid', 'Full payment must dynamically reflect as paid')
+    assert.equal(parseFloat(itemPaid.order_paid_amount), 2500)
+    console.log('✓ Scenario 10 passed: Live canonical payment status reflects unpaid, partial, and paid without mutating whatsapp_messages.')
+
+    // =========================================================================
+    // SCENARIO 11: End-to-End Order Creation from WhatsApp & Payment Failure Resiliency
+    // =========================================================================
+    console.log('\n[Scenario 11] Testing WhatsApp order creation sequence and payment failure resilience...')
+
+    // Find a valid active product
+    const { rows: prodRows } = await query('SELECT id, code, base_price FROM products WHERE is_active = true LIMIT 1')
+    assert.ok(prodRows.length > 0, 'At least 1 product must exist for testing')
+    const testProduct = prodRows[0]
+
+    // Step 1: Create Order with source = 'whatsapp'
+    const createOrdRes = await authRequest('/orders', {
+      method: 'POST',
+      body: {
+        customer_id: customerAId,
+        source: 'whatsapp',
+        notes: 'Sipariş WhatsApp mesajından oluşturuldu',
+        delivery_date: '2026-10-20',
+        items: [
+          {
+            product_id: testProduct.id,
+            quantity: 2,
+            unit_price: parseFloat(testProduct.base_price) || 500,
+            personalization: 'DECCO-WA',
+            material_selections: { note: 'Kaşmir Yeşil' }
+          }
+        ]
+      }
+    })
+    assert.equal(createOrdRes.status, 201, 'Order creation should succeed with 201')
+    assert.equal(createOrdRes.body.source, 'whatsapp', 'Order source must be whatsapp')
+    const createdWaOrderId = createOrdRes.body.id
+    trackedOrderIds.push(createdWaOrderId)
+
+    // Step 2: Immediately link order to WhatsApp message
+    const linkWaOrdRes = await authRequest(`/integrations/whatsapp/messages/${dbMsg1.id}/link-order`, {
+      method: 'POST',
+      body: { order_id: createdWaOrderId }
+    })
+    assert.equal(linkWaOrdRes.status, 200)
+    assert.equal(linkWaOrdRes.body.linked, true)
+    assert.equal(linkWaOrdRes.body.order_id, createdWaOrderId)
+
+    // Step 3: Verify created order is initially unpaid (ödeme yok -> unpaid)
+    const listInitialWa = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemInitialWa = listInitialWa.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemInitialWa.order_id, createdWaOrderId)
+    assert.equal(itemInitialWa.order_payment_status, 'unpaid', 'Newly created order without payment must be unpaid')
+
+    // Step 4: Simulate payment failure (e.g. invalid account ID 999999)
+    const badPayRes = await authRequest(`/orders/${createdWaOrderId}/payments`, {
+      method: 'POST',
+      body: {
+        amount: 100,
+        account_id: 999999,
+        description: 'Geçersiz hesap testi'
+      }
+    })
+    assert.notEqual(badPayRes.status, 200, 'Invalid payment attempt must fail')
+
+    // Step 5: Verify order remains linked and payment status remains 'unpaid' despite failure
+    const listResilient = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemResilient = listResilient.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemResilient.order_id, createdWaOrderId, 'Order must remain linked to WhatsApp message even if payment failed')
+    assert.equal(itemResilient.order_payment_status, 'unpaid', 'Payment status must remain unpaid after failed payment')
+
+    // Step 6: Verify post-creation payment updates the WhatsApp query dynamically
+    // Record a kapora/partial payment directly on this newly linked order
+    const orderTotal = parseFloat(createOrdRes.body.total_amount)
+    const kaporaAmount = Math.round((orderTotal / 2) * 100) / 100
+    await query('UPDATE orders SET paid_amount = $1 WHERE id = $2', [kaporaAmount, createdWaOrderId])
+
+    const listAfterKapora = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemAfterKapora = listAfterKapora.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemAfterKapora.order_id, createdWaOrderId)
+    assert.equal(itemAfterKapora.order_payment_status, 'partial', 'WhatsApp screen must dynamically reflect kapora on re-query')
+    assert.equal(parseFloat(itemAfterKapora.order_paid_amount), kaporaAmount)
+
+    // Complete payment to full
+    await query('UPDATE orders SET paid_amount = $1 WHERE id = $2', [orderTotal, createdWaOrderId])
+    const listAfterFull = await authRequest('/integrations/whatsapp/messages?status=matched')
+    const itemAfterFull = listAfterFull.body.messages.find(m => m.message_id === msgId1)
+    assert.equal(itemAfterFull.order_payment_status, 'paid', 'WhatsApp screen must dynamically reflect paid on re-query')
+    assert.equal(parseFloat(itemAfterFull.order_paid_amount), orderTotal)
+
+    console.log('✓ Scenario 11 passed: Order creation sequence preserves WhatsApp link even if payment fails; subsequent payments dynamically update WhatsApp screen.')
+
+
   } finally {
     // =========================================================================
     // CLEANUP & ISOLATION VERIFICATION

@@ -277,9 +277,31 @@
     }
 
     tbody.innerHTML = filtered.map(m => {
-      const orderHtml = m.order_id
-        ? `<a href="/orders.html" class="chip chip-blue" style="text-decoration:none">#${escapeHtml(m.order_no || m.order_id)}</a>`
-        : `<span style="color:var(--text-secondary);font-size:.8rem">—</span>`
+      let orderHtml = `<span style="color:var(--text-secondary);font-size:.8rem">—</span>`
+      if (m.order_id) {
+        let payBadge = ''
+        if (m.order_payment_status === 'paid') {
+          payBadge = `<span class="chip chip-green" style="font-size:.68rem">Ödendi</span>`
+        } else if (m.order_payment_status === 'partial') {
+          payBadge = `<span class="chip chip-yellow" style="font-size:.68rem">Kısmi (₺${Number(m.order_paid_amount || 0).toLocaleString('tr-TR')})</span>`
+        } else {
+          payBadge = `<span class="chip chip-red" style="font-size:.68rem">Ödeme Bekliyor</span>`
+        }
+
+        const opBadge = m.order_status
+          ? `<span class="chip chip-gray" style="font-size:.68rem">${escapeHtml(m.order_status)}</span>`
+          : ''
+
+        orderHtml = `
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <a href="/orders.html" class="chip chip-blue" style="text-decoration:none;font-weight:700">#${escapeHtml(m.order_no || m.order_id)}</a>
+              ${opBadge}
+            </div>
+            <div>${payBadge}</div>
+          </div>
+        `
+      }
 
       return `
         <tr>
@@ -356,30 +378,68 @@
       `
     }
 
-    // Sipariş bağlama bölümü
+    // Sipariş bağlama & oluşturma bölümü
     let orderSectionHtml = ''
     if (item.match_status !== 'matched') {
       orderSectionHtml = `
         <div style="padding:10px;background:var(--surface-2);border-radius:6px;font-size:.8rem;color:var(--text-secondary)">
-          ℹ️ Sipariş bağlamak için önce mesajın bir müşteriye eşleştirilmiş olması gereklidir.
+          ℹ️ Sipariş bağlamak veya yeni sipariş oluşturmak için önce mesajın bir müşteriye eşleştirilmiş olması gereklidir.
         </div>
       `
     } else {
+      let linkedInfoHtml = ''
+      if (item.order_id) {
+        let pText = 'Ödeme Bekliyor'
+        let pClass = 'chip-red'
+        if (item.order_payment_status === 'paid') {
+          pText = 'Ödendi'
+          pClass = 'chip-green'
+        } else if (item.order_payment_status === 'partial') {
+          pText = `Kısmi (₺${Number(item.order_paid_amount || 0).toLocaleString('tr-TR')})`
+          pClass = 'chip-yellow'
+        }
+
+        linkedInfoHtml = `
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+            <div>
+              <div style="font-size:.74rem;color:var(--text-secondary);font-weight:600">BAĞLI SİPARİŞ</div>
+              <div style="font-weight:700;font-size:1.05rem;margin-top:2px">
+                <a href="/orders.html" style="color:var(--primary);text-decoration:none">#${escapeHtml(item.order_no || item.order_id)}</a>
+                — ₺${Number(item.order_total_amount || 0).toLocaleString('tr-TR')}
+              </div>
+              <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+                <span class="chip chip-gray" style="font-size:.7rem">${escapeHtml(item.order_status || 'draft')}</span>
+                <span class="chip ${pClass}" style="font-size:.7rem">${pText}</span>
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-unlink-order" data-msg-id="${item.id}">Bağı Kaldır</button>
+          </div>
+        `
+      }
+
       const orders = item.candidate_orders || []
-      const orderOptions = orders.map(o => `
-        <option value="${o.id}" ${item.order_id === o.id ? 'selected' : ''}>
-          #${escapeHtml(o.order_no || o.id)} — ₺${Number(o.total_amount || 0).toLocaleString('tr-TR')} (${escapeHtml(o.status)})
-        </option>
-      `).join('')
+      const orderOptions = orders.map(o => {
+        let payLabel = 'Ödenmedi'
+        if (o.payment_status === 'paid') payLabel = 'Ödendi'
+        else if (o.payment_status === 'partial') payLabel = `Kısmi (₺${o.paid_amount || 0})`
+        return `
+          <option value="${o.id}" ${item.order_id === o.id ? 'selected' : ''}>
+            #${escapeHtml(o.order_no || o.id)} — ₺${Number(o.total_amount || 0).toLocaleString('tr-TR')} (${escapeHtml(o.status)} · ${payLabel})
+          </option>
+        `
+      }).join('')
 
       orderSectionHtml = `
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${linkedInfoHtml}
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select id="select-order-id" style="flex:1;min-width:200px;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)">
-            <option value="">— Sipariş Seçin —</option>
+            <option value="">— Mevcut Sipariş Seçin —</option>
             ${orderOptions}
           </select>
-          <button class="btn btn-primary btn-sm" id="btn-link-order" data-msg-id="${item.id}">Siparişi Bağla</button>
-          ${item.order_id ? `<button class="btn btn-secondary btn-sm" id="btn-unlink-order" data-msg-id="${item.id}">Bağı Kaldır</button>` : ''}
+          <button class="btn btn-secondary btn-sm" id="btn-link-order" data-msg-id="${item.id}">Mevcut Siparişi Bağla</button>
+          <button class="btn btn-primary btn-sm" id="btn-open-create-order" data-msg-id="${item.id}" style="background:rgba(34,197,94,.15);color:var(--primary);border:1px solid rgba(34,197,94,.4);font-weight:700">
+            ➕ Yeni Sipariş Oluştur
+          </button>
         </div>
       `
     }
@@ -408,7 +468,7 @@
         <div style="font-weight:700;font-size:.9rem;margin-bottom:6px">Müşteri Eşleştirmesi</div>
         ${matchSectionHtml}
 
-        <div style="font-weight:700;font-size:.9rem;margin-top:16px;margin-bottom:6px">Sipariş Bağlantısı</div>
+        <div style="font-weight:700;font-size:.9rem;margin-top:16px;margin-bottom:6px">Sipariş Bağlantısı & İşlemleri</div>
         ${orderSectionHtml}
 
         <div style="margin-top:20px">
@@ -447,7 +507,7 @@
       })
     }
 
-    // Link order click
+    // Link existing order click
     const btnLink = modalEl.querySelector('#btn-link-order')
     if (btnLink) {
       btnLink.addEventListener('click', async () => {
@@ -465,6 +525,321 @@
         await doLinkOrder(btnUnlink.dataset.msgId, null)
       })
     }
+
+    // Open create order wizard
+    const btnOpenCreate = modalEl.querySelector('#btn-open-create-order')
+    if (btnOpenCreate) {
+      btnOpenCreate.addEventListener('click', () => {
+        openCreateOrderModal(item)
+      })
+    }
+  }
+
+  // WhatsApp'tan Sipariş Oluştur Akışı
+  let newOrderItems = []
+
+  async function openCreateOrderModal(item) {
+    if (!item.matched_customer) {
+      toast('Önce mesajı bir müşteriye eşleştirin', 'error')
+      return
+    }
+
+    newOrderItems = []
+    let productsList = []
+    let accountsList = []
+
+    try {
+      productsList = await api('/products') || []
+      accountsList = await api('/finance/accounts') || []
+    } catch (e) {
+      console.warn('Error loading products/accounts:', e)
+    }
+
+    function renderCreateOrderModalContent() {
+      const total = newOrderItems.reduce((s, it) => s + it.unit_price * it.quantity, 0)
+      const payTypeVal = document.getElementById('new-pay-type')?.value || 'none'
+      const deliveryDateVal = document.getElementById('new-delivery-date')?.value || ''
+      const notesVal = document.getElementById('new-order-notes')?.value || (item.text ? `WhatsApp Mesajı: ${item.text.slice(0, 100)}` : '')
+      const payAmountVal = document.getElementById('new-pay-amount')?.value || total
+      const payAccountVal = document.getElementById('new-pay-account')?.value || (accountsList[0]?.id || '')
+
+      const itemsHtml = newOrderItems.length === 0
+        ? `<div style="padding:10px;background:var(--surface);border-radius:6px;border:1px dashed var(--border);color:var(--text-secondary);font-size:.82rem;text-align:center">Henüz ürün eklenmedi.</div>`
+        : newOrderItems.map((it, idx) => `
+            <div style="display:flex;justify-content:space-between;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px">
+              <div>
+                <span style="font-weight:600">${escapeHtml(it.product_label)}</span>
+                ${it.material_note ? `<span style="color:var(--text-secondary);font-size:.8rem"> · ${escapeHtml(it.material_note)}</span>` : ''}
+                ${it.personalization ? `<span style="color:var(--text-secondary);font-size:.8rem"> · ✏️ ${escapeHtml(it.personalization)}</span>` : ''}
+              </div>
+              <div style="display:flex;align-items:center;gap:12px">
+                <span style="font-weight:600;font-size:.88rem">₺${(it.unit_price * it.quantity).toLocaleString('tr-TR')} (${it.quantity} adet)</span>
+                <button type="button" class="btn btn-danger btn-sm btn-remove-item" data-idx="${idx}" style="padding:2px 6px">✕</button>
+              </div>
+            </div>
+          `).join('')
+
+      const html = `
+        <div class="modal-header">
+          <div style="font-weight:700;font-size:1.05rem">WhatsApp'tan Sipariş Oluştur</div>
+          <button class="btn-close" onclick="closeModal()">✕</button>
+        </div>
+        <div class="modal-body modal-xl" style="max-height:80vh;overflow-y:auto">
+          <!-- Müşteri ve Kanal Bilgisi (Sabit) -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px">
+            <div>
+              <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;color:var(--text-secondary)">Müşteri</div>
+              <div style="font-weight:700;font-size:.95rem">${escapeHtml(item.matched_customer.name)}</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">${escapeHtml(item.matched_customer.phone || item.wa_id)} (ID: #${item.matched_customer.id})</div>
+            </div>
+            <div>
+              <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;color:var(--text-secondary)">Satış Kanalı</div>
+              <div style="font-weight:700;font-size:.95rem;color:var(--primary)">💬 WhatsApp</div>
+              <div style="font-size:.78rem;color:var(--text-secondary)">Kaynak: Otomatik 'whatsapp'</div>
+            </div>
+          </div>
+
+          <!-- Ürün Ekleme Kartı -->
+          <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
+            <div style="font-weight:700;font-size:.88rem;margin-bottom:10px">Ürün Ekle</div>
+            <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin-bottom:10px">
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Ürün</label>
+                <select id="new-item-product" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)">
+                  <option value="">— Ürün Seçin —</option>
+                  ${productsList.map(p => `<option value="${p.id}" data-price="${p.base_price || 0}" data-code="${escapeHtml(p.code)}" data-name="${escapeHtml(p.name)}">${escapeHtml(p.code)} — ${escapeHtml(p.name)} (₺${Number(p.base_price || 0).toLocaleString('tr-TR')})</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Birim Fiyat (₺)</label>
+                <input id="new-item-price" type="number" step="0.01" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" placeholder="0.00" />
+              </div>
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Adet</label>
+                <input id="new-item-qty" type="number" min="1" value="1" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Deri / Renk Notu</label>
+                <input id="new-item-material" type="text" placeholder="Örn: Kaşmir Yeşil, Crazy Taba..." style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+              </div>
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">İsim Baskısı</label>
+                <input id="new-item-pers" type="text" placeholder="Örn: AHMET YILMAZ..." style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+              </div>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-add-item-to-list">+ Listeye Ekle</button>
+          </div>
+
+          <!-- Eklenen Ürünler Listesi -->
+          <div style="margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-weight:700;font-size:.88rem">Sipariş Kalemleri (${newOrderItems.length})</span>
+              <span style="font-weight:700;font-size:.95rem;color:var(--primary)">Toplam: ₺${total.toLocaleString('tr-TR')}</span>
+            </div>
+            ${itemsHtml}
+          </div>
+
+          <!-- Teslimat & Notlar -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+            <div>
+              <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Teslimat Tarihi</label>
+              <input id="new-delivery-date" type="date" value="${deliveryDateVal}" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+            </div>
+            <div>
+              <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Sipariş Notu</label>
+              <input id="new-order-notes" type="text" value="${escapeHtml(notesVal)}" placeholder="Siparişle ilgili özel notlar..." style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+            </div>
+          </div>
+
+          <!-- Ödeme Seçenekleri (Decco OS Ödeme Akışı) -->
+          <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div style="font-weight:700;font-size:.88rem;margin-bottom:8px">Ödeme Durumu & Yöntemi</div>
+            <div style="margin-bottom:10px">
+              <select id="new-pay-type" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)">
+                <option value="none" ${payTypeVal === 'none' ? 'selected' : ''}>Ödeme alınmadı (Ödeme Bekliyor)</option>
+                <option value="partial" ${payTypeVal === 'partial' ? 'selected' : ''}>Kapora alındı (Kısmi Ödeme)</option>
+                <option value="full" ${payTypeVal === 'full' ? 'selected' : ''}>Tam ödeme alındı (Ödendi)</option>
+              </select>
+            </div>
+            <div id="new-pay-fields" style="display:${payTypeVal === 'none' ? 'none' : 'grid'};grid-template-columns:1fr 1fr;gap:10px">
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Tahsil Edilen Tutar (₺)</label>
+                <input id="new-pay-amount" type="number" step="0.01" value="${payTypeVal === 'full' ? total : payAmountVal}" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)" />
+              </div>
+              <div>
+                <label style="font-size:.72rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">Kasa / Banka Hesabı</label>
+                <select id="new-pay-account" style="width:100%;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)">
+                  ${accountsList.map(a => `<option value="${a.id}" ${String(a.id) === String(payAccountVal) ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center">
+          <button class="btn btn-secondary btn-sm" id="btn-back-to-detail">Geri</button>
+          <button class="btn btn-primary btn-sm" id="btn-submit-create-order" ${newOrderItems.length === 0 ? 'disabled' : ''}>
+            Siparişi Oluştur ve Bağla
+          </button>
+        </div>
+      `
+      openModal(html, 'modal-xl')
+
+      const modalEl = document.getElementById('modal-overlay')
+      if (!modalEl) return
+
+      // Back to detail modal
+      modalEl.querySelector('#btn-back-to-detail')?.addEventListener('click', () => {
+        openDetailModal(item)
+      })
+
+      // Product dropdown change
+      const pSel = modalEl.querySelector('#new-item-product')
+      if (pSel) {
+        pSel.addEventListener('change', () => {
+          const opt = pSel.options[pSel.selectedIndex]
+          const priceInput = modalEl.querySelector('#new-item-price')
+          if (priceInput && opt?.dataset.price) {
+            priceInput.value = opt.dataset.price
+          }
+        })
+      }
+
+      // Add item to list
+      const btnAdd = modalEl.querySelector('#btn-add-item-to-list')
+      if (btnAdd) {
+        btnAdd.addEventListener('click', () => {
+          const prodId = pSel?.value
+          const prodOpt = pSel?.options[pSel.selectedIndex]
+          const price = parseFloat(modalEl.querySelector('#new-item-price')?.value) || 0
+          const qty = parseInt(modalEl.querySelector('#new-item-qty')?.value, 10) || 1
+          const mat = modalEl.querySelector('#new-item-material')?.value.trim() || ''
+          const pers = modalEl.querySelector('#new-item-pers')?.value.trim() || ''
+
+          if (!prodId) { toast('Lütfen bir ürün seçin', 'error'); return }
+          if (qty <= 0) { toast('Adet en az 1 olmalıdır', 'error'); return }
+
+          newOrderItems.push({
+            product_id: parseInt(prodId, 10),
+            product_label: `${prodOpt.dataset.code || ''} — ${prodOpt.dataset.name || ''}`.trim(),
+            unit_price: price,
+            quantity: qty,
+            material_note: mat,
+            personalization: pers
+          })
+
+          renderCreateOrderModalContent()
+        })
+      }
+
+      // Remove item
+      modalEl.querySelectorAll('.btn-remove-item').forEach(b => {
+        b.addEventListener('click', () => {
+          const idx = parseInt(b.dataset.idx, 10)
+          newOrderItems.splice(idx, 1)
+          renderCreateOrderModalContent()
+        })
+      })
+
+      // Pay type change
+      const paySel = modalEl.querySelector('#new-pay-type')
+      const payFields = modalEl.querySelector('#new-pay-fields')
+      const payAmtInput = modalEl.querySelector('#new-pay-amount')
+      if (paySel) {
+        paySel.addEventListener('change', () => {
+          const v = paySel.value
+          if (payFields) payFields.style.display = v === 'none' ? 'none' : 'grid'
+          if (v === 'full' && payAmtInput) {
+            payAmtInput.value = newOrderItems.reduce((s, it) => s + it.unit_price * it.quantity, 0)
+          }
+        })
+      }
+
+      // Submit order
+      const btnSubmit = modalEl.querySelector('#btn-submit-create-order')
+      if (btnSubmit) {
+        btnSubmit.addEventListener('click', async () => {
+          if (newOrderItems.length === 0) {
+            toast('En az bir ürün eklemelisiniz', 'error')
+            return
+          }
+
+          const payType = modalEl.querySelector('#new-pay-type')?.value || 'none'
+          const payAmount = parseFloat(modalEl.querySelector('#new-pay-amount')?.value) || 0
+          const payAccount = modalEl.querySelector('#new-pay-account')?.value
+          const deliveryDate = modalEl.querySelector('#new-delivery-date')?.value || null
+          const notes = modalEl.querySelector('#new-order-notes')?.value.trim() || null
+
+          btnSubmit.disabled = true
+          btnSubmit.textContent = 'Oluşturuluyor...'
+
+          const orderItemsPayload = newOrderItems.map(it => ({
+            product_id: it.product_id,
+            quantity: it.quantity,
+            unit_price: it.unit_price,
+            personalization: it.personalization || null,
+            material_selections: it.material_note ? { note: it.material_note } : {}
+          }))
+
+          let createdOrder = null
+          try {
+            // Step 1: POST /api/orders
+            createdOrder = await api('/orders', {
+              method: 'POST',
+              body: {
+                customer_id: item.matched_customer.id,
+                source: 'whatsapp',
+                notes: notes,
+                delivery_date: deliveryDate,
+                items: orderItemsPayload
+              }
+            })
+          } catch (ordErr) {
+            btnSubmit.disabled = false
+            btnSubmit.textContent = 'Siparişi Oluştur ve Bağla'
+            toast(`Sipariş oluşturulamadı: ${ordErr.message}`, 'error')
+            return
+          }
+
+          // Step 2: Immediately link order to WhatsApp message
+          try {
+            await api(`/integrations/whatsapp/messages/${item.id}/link-order`, {
+              method: 'POST',
+              body: { order_id: createdOrder.id }
+            })
+          } catch (linkErr) {
+            console.error('Link order error:', linkErr)
+            toast(`Sipariş oluşturuldu (#${createdOrder.order_no || createdOrder.id}) ancak mesaja bağlanamadı: ${linkErr.message}`, 'error')
+          }
+
+          // Step 3: If payment selected, process payment
+          if (payType !== 'none' && payAmount > 0) {
+            try {
+              await api(`/orders/${createdOrder.id}/payments`, {
+                method: 'POST',
+                body: {
+                  amount: payAmount,
+                  account_id: payAccount,
+                  description: payType === 'partial' ? 'WhatsApp sipariş kapora' : 'WhatsApp sipariş tam ödeme'
+                }
+              })
+              toast(`Sipariş #${createdOrder.order_no || createdOrder.id} oluşturuldu, mesaja bağlandı ve ödeme kaydedildi 🎉`, 'success')
+            } catch (payErr) {
+              console.error('Payment error:', payErr)
+              toast(`Sipariş #${createdOrder.order_no || createdOrder.id} oluşturuldu ve mesaja bağlandı; ancak ödeme kaydedilemedi: ${payErr.message}`, 'error')
+            }
+          } else {
+            toast(`Sipariş #${createdOrder.order_no || createdOrder.id} oluşturuldu ve mesaja bağlandı 🎉`, 'success')
+          }
+
+          closeModal()
+          await loadMessages()
+        })
+      }
+    }
+
+    renderCreateOrderModalContent()
   }
 
   async function doMatchCustomer(msgId, custId) {
