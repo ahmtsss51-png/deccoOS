@@ -7,8 +7,10 @@ import {
   queryPaytrStatus,
   createPaytrLink,
   validatePaytrCallbackUrl,
-  centsToDecimalString
+  centsToDecimalString,
+  parsePaytrPaymentDate
 } from '../services/paytr.js'
+import { isSystemOpen } from '../opening-guard.js'
 
 const router = Router()
 
@@ -1158,6 +1160,437 @@ router.post('/paytr/orders/:orderId/create-link', async (req, res, next) => {
       throw err
     } finally {
       finClient.release()
+    }
+
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/paytr/events/:eventId/process
+ * PayTR Link Payment Processing — Verified Finance Foundation
+ *
+ * Converts a verified PayTR link callback event into a real customer payment via Decco finance engine.
+ * Flow:
+ * A - Read Phase: event + link + order lookup (read-only, no locks)
+ * B - Remote Verification: queryPaytrStatus(merchant_oid) (executed with ZERO DB locks held)
+ * C - Finance Transaction: single PostgreSQL transaction locking event, link, order FOR UPDATE,
+ *     strictly verifying idempotency via payment_external_refs, calling applyCustomerPayment(),
+ *     inserting payment_external_refs, setting link.paid_at and event.status='processed'.
+ */
+router.post('/paytr/events/:eventId/process', async (req, res, next) => {
+  try {
+    if (!(await isSystemOpen())) {
+      return res.status(423).json({
+        error: 'Sistem PRE-OPENING modunda. Finansal işlem yapılamaz.',
+        code: 'PRE_OPENING_MODE'
+      })
+    }
+
+    const eventId = parseInt(req.params.eventId, 10)
+    if (!Number.isInteger(eventId) || eventId <= 0) {
+      return res.status(400).json({ error: 'Geçersiz event kimliği', code: 'INVALID_EVENT_ID' })
+    }
+
+    // A — Read phase (read-only, no locks)
+    const { rows: eventRows } = await query(
+      `SELECT id, provider, event_type, status, payload, error_message, processed_at
+       FROM integration_events
+       WHERE id = $1`,
+      [eventId]
+    )
+    if (eventRows.length === 0) {
+      return res.status(404).json({ error: 'Entegrasyon eventi bulunamadı', code: 'EVENT_NOT_FOUND' })
+    }
+    const event = eventRows[0]
+
+    if (event.provider !== 'paytr' || event.event_type !== 'link.payment.success') {
+      return res.status(422).json({
+        error: 'Yalnızca PayTR link.payment.success eventleri işlenebilir',
+        code: 'UNPROCESSABLE_EVENT_TYPE'
+      })
+    }
+
+    const merchantOid = event.payload?.merchant_oid
+    const callbackId = event.payload?.callback_id
+
+    if (event.status === 'processed') {
+      if (merchantOid) {
+        const { rows: refRows } = await query(
+          `SELECT payment_id FROM payment_external_refs
+           WHERE provider = 'paytr' AND reference_type = 'merchant_oid' AND external_id = $1`,
+          [merchantOid]
+        )
+        return res.status(200).json({
+          ok: true,
+          already_processed: true,
+          event_id: event.id,
+          payment_id: refRows[0]?.payment_id || null,
+          message: 'Event zaten başarıyla işlenmiş (idempotent)'
+        })
+      }
+      return res.status(200).json({
+        ok: true,
+        already_processed: true,
+        event_id: event.id,
+        message: 'Event zaten başarıyla işlenmiş (idempotent)'
+      })
+    }
+
+    if (event.status !== 'received') {
+      return res.status(422).json({
+        error: `Event '${event.status}' durumunda, işlenemez`,
+        code: 'EVENT_NOT_READY'
+      })
+    }
+
+    if (!merchantOid || !callbackId) {
+      return res.status(422).json({
+        error: 'Event payload içinde merchant_oid veya callback_id eksik',
+        code: 'INVALID_EVENT_PAYLOAD'
+      })
+    }
+
+    const { rows: linkRows } = await query(
+      `SELECT l.*, o.customer_id, o.order_no, o.total_amount AS order_total, o.paid_amount AS order_paid,
+              o.status AS order_status, o.deleted_at AS order_deleted_at
+       FROM paytr_payment_links l
+       JOIN orders o ON o.id = l.order_id
+       WHERE l.callback_id = $1`,
+      [callbackId]
+    )
+    if (linkRows.length === 0) {
+      return res.status(404).json({
+        error: 'İlgili PayTR link kaydı veya sipariş bulunamadı',
+        code: 'LINK_NOT_FOUND'
+      })
+    }
+    const link = linkRows[0]
+
+    if (link.merchant_oid !== merchantOid) {
+      return res.status(422).json({
+        error: 'Link merchant_oid ile event merchant_oid uyuşmuyor',
+        code: 'MERCHANT_OID_MISMATCH'
+      })
+    }
+    if (link.status !== 'paid') {
+      return res.status(422).json({
+        error: `Link henüz 'paid' durumunda değil (durum: ${link.status})`,
+        code: 'LINK_NOT_PAID'
+      })
+    }
+    if (link.order_deleted_at || link.order_status === 'cancelled') {
+      return res.status(422).json({
+        error: 'Sipariş silinmiş veya iptal edilmiş',
+        code: 'ORDER_INACTIVE'
+      })
+    }
+
+    // B — Remote verification (queryPaytrStatus with ZERO DB locks)
+    let statusRes
+    try {
+      statusRes = await queryPaytrStatus(merchantOid)
+    } catch (err) {
+      return res.status(502).json({
+        error: 'PayTR durum sorgu servisine erişilemedi: ' + err.message,
+        code: 'PAYTR_UPSTREAM_ERROR'
+      })
+    }
+
+    if (!statusRes.ok) {
+      return res.status(502).json({
+        error: statusRes.reason || statusRes.message || 'PayTR durum sorgusu başarısız',
+        code: statusRes.error_code || 'PAYTR_QUERY_FAILED'
+      })
+    }
+
+    const statusData = statusRes.data
+
+    if (statusData.status !== 'success') {
+      return res.status(422).json({
+        error: `PayTR ödeme durumu '${statusData.status}', ödeme başarılı değil`,
+        code: 'PAYTR_STATUS_NOT_SUCCESS'
+      })
+    }
+
+    if (statusData.merchant_oid !== merchantOid) {
+      return res.status(422).json({
+        error: 'PayTR yanıtındaki merchant_oid ile sorgulanan merchant_oid uyuşmuyor',
+        code: 'PAYTR_OID_MISMATCH'
+      })
+    }
+
+    // Guard 1: Currency must be TL or TRY (Requirement 1)
+    const rawCurrency = (statusData.currency || '').toUpperCase()
+    if (rawCurrency !== 'TL' && rawCurrency !== 'TRY') {
+      return res.status(422).json({
+        error: `Desteklenmeyen para birimi: '${statusData.currency}'. Yalnızca TL ve TRY kabul edilir`,
+        code: 'UNSUPPORTED_PAYTR_CURRENCY'
+      })
+    }
+
+    // Guard 2: Returns must be empty (Requirement 2)
+    if (Array.isArray(statusData.returns) && statusData.returns.length > 0) {
+      return res.status(422).json({
+        error: 'PayTR Durum Sorgusu iade/kısmi iade kaydı içeriyor. İadeli ödemeler bu fazda işlenemez',
+        code: 'PAYTR_REFUND_PRESENT'
+      })
+    }
+
+    // Guard 3: Test mode blocked in ALL environments (Requirement 3)
+    if (statusData.test_mode === 1) {
+      return res.status(422).json({
+        error: 'PayTR test modu ödemeleri için finansal mutasyon yapılamaz',
+        code: 'PAYTR_TEST_MODE_PAYMENT'
+      })
+    }
+
+    // Guard 4: payment_amount exact cents match with link.requested_amount
+    const requestedCents = parseDecimalToCents(link.requested_amount)
+    if (statusData.payment_amount_cents == null || statusData.payment_amount_cents !== requestedCents) {
+      return res.status(422).json({
+        error: `PayTR ödeme tutarı (${statusData.payment_amount}) ile talep edilen tutar (${link.requested_amount}) uyuşmuyor`,
+        code: 'PAYMENT_AMOUNT_MISMATCH'
+      })
+    }
+
+    const verifiedPaidAt = parsePaytrPaymentDate(statusData.payment_date, statusData.auth_date)
+
+    // C — Finance transaction (Single PostgreSQL transaction)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      // 1. Lock integration_events FOR UPDATE
+      const { rows: lockEvRows } = await client.query(
+        `SELECT id, status FROM integration_events WHERE id = $1 FOR UPDATE`,
+        [eventId]
+      )
+      if (lockEvRows.length === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Event bulunamadı', code: 'EVENT_NOT_FOUND' })
+      }
+      const curEvent = lockEvRows[0]
+      if (curEvent.status === 'processed') {
+        const { rows: refRows } = await client.query(
+          `SELECT payment_id FROM payment_external_refs
+           WHERE provider = 'paytr' AND reference_type = 'merchant_oid' AND external_id = $1`,
+          [merchantOid]
+        )
+        await client.query('COMMIT')
+        return res.status(200).json({
+          ok: true,
+          already_processed: true,
+          event_id: eventId,
+          payment_id: refRows[0]?.payment_id || null,
+          message: 'Event başka bir eşzamanlı işlem tarafından işlendi (idempotent)'
+        })
+      }
+      if (curEvent.status !== 'received') {
+        await client.query('ROLLBACK')
+        return res.status(422).json({ error: `Event '${curEvent.status}' durumunda`, code: 'EVENT_NOT_READY' })
+      }
+
+      // 2. Lock paytr_payment_links FOR UPDATE
+      const { rows: lockLinkRows } = await client.query(
+        `SELECT id, order_id, callback_id, merchant_oid, requested_amount, status, paid_at
+         FROM paytr_payment_links
+         WHERE id = $1 FOR UPDATE`,
+        [link.id]
+      )
+      if (lockLinkRows.length === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Link bulunamadı', code: 'LINK_NOT_FOUND' })
+      }
+      const curLink = lockLinkRows[0]
+      if (curLink.status !== 'paid') {
+        await client.query('ROLLBACK')
+        return res.status(422).json({ error: `Link durumu '${curLink.status}', paid değil`, code: 'LINK_NOT_PAID' })
+      }
+
+      // 3. Lock orders FOR UPDATE
+      const { rows: lockOrderRows } = await client.query(
+        `SELECT id, customer_id, order_no, total_amount, paid_amount, status, deleted_at
+         FROM orders
+         WHERE id = $1 FOR UPDATE`,
+        [curLink.order_id]
+      )
+      if (lockOrderRows.length === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Sipariş bulunamadı', code: 'ORDER_NOT_FOUND' })
+      }
+      const curOrder = lockOrderRows[0]
+      if (curOrder.deleted_at || curOrder.status === 'cancelled') {
+        await client.query('ROLLBACK')
+        return res.status(422).json({ error: 'Sipariş iptal edilmiş veya silinmiş', code: 'ORDER_INACTIVE' })
+      }
+
+      // 4. Resolve Active PayTR Card Account
+      const { rows: accRows } = await client.query(
+        `SELECT id, name, account_type, balance, is_active
+         FROM accounts
+         WHERE name = 'PayTR' AND account_type = 'card' AND is_active = true`
+      )
+      if (accRows.length !== 1) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({
+          error: `Aktif PayTR kart hesabı bulunamadı veya birden fazla bulundu (${accRows.length})`,
+          code: 'PAYTR_ACCOUNT_INVALID'
+        })
+      }
+      const paytrAccount = accRows[0]
+
+      // 5. Strict payment_external_refs idempotency & conflict verification (Requirement 4)
+      const { rows: existingRefRows } = await client.query(
+        `SELECT r.payment_id, cp.customer_id, cp.account_id, cp.amount AS payment_amount
+         FROM payment_external_refs r
+         JOIN customer_payments cp ON cp.id = r.payment_id
+         WHERE r.provider = 'paytr' AND r.reference_type = 'merchant_oid' AND r.external_id = $1
+         FOR UPDATE OF r`,
+        [merchantOid]
+      )
+
+      if (existingRefRows.length > 0) {
+        const existingRef = existingRefRows[0]
+        const { rows: allocRows } = await client.query(
+          `SELECT order_id, amount FROM customer_payment_allocations WHERE payment_id = $1`,
+          [existingRef.payment_id]
+        )
+
+        const paymentAmountCents = parseDecimalToCents(existingRef.payment_amount)
+        const isCustomerMatch = existingRef.customer_id === curOrder.customer_id
+        const isAmountMatch = paymentAmountCents === statusData.payment_amount_cents
+        const isAccountMatch = existingRef.account_id === paytrAccount.id
+        const isSingleAlloc = allocRows.length === 1
+        const allocOrderMatch = isSingleAlloc && allocRows[0].order_id === curOrder.id
+        const allocAmountMatch = isSingleAlloc && parseDecimalToCents(allocRows[0].amount) === statusData.payment_amount_cents
+
+        if (isCustomerMatch && isAmountMatch && isAccountMatch && allocOrderMatch && allocAmountMatch) {
+          // All 5 strict conditions match -> Idempotent success
+          await client.query(
+            `UPDATE integration_events
+             SET status = 'processed', processed_at = NOW(), error_message = NULL
+             WHERE id = $1`,
+            [eventId]
+          )
+          if (verifiedPaidAt && !curLink.paid_at) {
+            await client.query(
+              `UPDATE paytr_payment_links SET paid_at = $1 WHERE id = $2`,
+              [verifiedPaidAt, curLink.id]
+            )
+          }
+          await client.query('COMMIT')
+          return res.status(200).json({
+            ok: true,
+            already_processed: true,
+            event_id: eventId,
+            payment_id: existingRef.payment_id,
+            order_id: curOrder.id,
+            amount: centsToDecimalString(statusData.payment_amount_cents),
+            message: 'Ödeme referansı zaten mevcut ve doğrulandı (idempotent)'
+          })
+        } else {
+          // Mismatch conflict! Do NOT mark event processed.
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'PayTR ödeme referansı mevcut ancak müşteri, tutar, hesap veya sipariş eşleşmiyor',
+            code: 'PAYMENT_REFERENCE_CONFLICT'
+          })
+        }
+      }
+
+      // 6. Open balance guard
+      const orderTotalCents = parseDecimalToCents(curOrder.total_amount) || 0
+      const orderPaidCents = parseDecimalToCents(curOrder.paid_amount) || 0
+      const openBalanceCents = orderTotalCents - orderPaidCents
+      if (openBalanceCents < statusData.payment_amount_cents) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({
+          error: `Sipariş açık bakiyesi (${centsToDecimalString(openBalanceCents)}) tahsilat tutarından (${centsToDecimalString(statusData.payment_amount_cents)}) küçük, aşırı ödeme yapılamaz`,
+          code: 'ORDER_OVERPAYMENT'
+        })
+      }
+
+      // 7. Apply Customer Payment via Decco Finance Engine
+      const paymentAmountDecimal = parseFloat(centsToDecimalString(statusData.payment_amount_cents))
+      const paymentDesc = `PayTR Link Ödemesi: #${curOrder.order_no || curOrder.id} (OID: ${merchantOid})`
+
+      const paymentResult = await applyCustomerPayment(client, {
+        customer_id: curOrder.customer_id,
+        account_id: paytrAccount.id,
+        amount: paymentAmountDecimal,
+        method: 'credit_card',
+        paid_at: verifiedPaidAt,
+        description: paymentDesc,
+        allocations: [{
+          order_id: curOrder.id,
+          amount: paymentAmountDecimal
+        }]
+      })
+
+      const newPaymentId = paymentResult?.payment_id
+      if (!newPaymentId) {
+        await client.query('ROLLBACK')
+        return res.status(500).json({
+          error: 'applyCustomerPayment geçerli bir payment_id döndürmedi',
+          code: 'PAYMENT_CREATION_FAILED'
+        })
+      }
+
+      // 8. Insert payment_external_refs (handles 23505 race condition fallback)
+      try {
+        await client.query(
+          `INSERT INTO payment_external_refs (payment_id, provider, reference_type, external_id)
+           VALUES ($1, 'paytr', 'merchant_oid', $2)`,
+          [newPaymentId, merchantOid]
+        )
+      } catch (refErr) {
+        if (refErr.code === '23505') {
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'Eşzamanlı istek sonucunda ödeme referansı zaten oluşturuldu',
+            code: 'PAYMENT_REFERENCE_CONFLICT'
+          })
+        }
+        throw refErr
+      }
+
+      // 9. Update paytr_payment_links.paid_at
+      if (verifiedPaidAt) {
+        await client.query(
+          `UPDATE paytr_payment_links SET paid_at = $1 WHERE id = $2`,
+          [verifiedPaidAt, curLink.id]
+        )
+      }
+
+      // 10. Update integration_events to processed
+      await client.query(
+        `UPDATE integration_events
+         SET status = 'processed', processed_at = NOW(), error_message = NULL
+         WHERE id = $1`,
+        [eventId]
+      )
+
+      await client.query('COMMIT')
+
+      return res.status(200).json({
+        ok: true,
+        event_id: eventId,
+        payment_id: newPaymentId,
+        order_id: curOrder.id,
+        amount: centsToDecimalString(statusData.payment_amount_cents),
+        currency: statusData.currency,
+        paid_at: verifiedPaidAt,
+        merchant_oid: merchantOid,
+        message: 'PayTR link ödemesi başarıyla finansal tahsilata dönüştürüldü'
+      })
+
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
     }
 
   } catch (err) {

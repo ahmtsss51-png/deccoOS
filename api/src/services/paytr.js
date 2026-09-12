@@ -65,7 +65,7 @@ export function normalizePaytrStatusResponse(rawPayload, requestedMerchantOid) {
 
   return {
     status: String(rawPayload.status),
-    merchant_oid: requestedMerchantOid,
+    merchant_oid: rawPayload.merchant_oid != null ? String(rawPayload.merchant_oid) : requestedMerchantOid,
     payment_amount: rawPaymentAmount,
     payment_total: rawPaymentTotal,
     net_tutar: rawNetTutar,
@@ -95,7 +95,7 @@ export async function queryPaytrStatus(merchantOid, options = {}) {
   const merchantId = options.merchantId !== undefined ? options.merchantId : process.env.PAYTR_MERCHANT_ID
   const merchantKey = options.merchantKey !== undefined ? options.merchantKey : process.env.PAYTR_MERCHANT_KEY
   const merchantSalt = options.merchantSalt !== undefined ? options.merchantSalt : process.env.PAYTR_MERCHANT_SALT
-  const endpoint = options.endpoint || 'https://www.paytr.com/odeme/durum-sorgu'
+  const endpoint = options.endpoint || process.env.PAYTR_STATUS_ENDPOINT || 'https://www.paytr.com/odeme/durum-sorgu'
   const timeoutMs = options.timeoutMs || 10000
   const fetchFn = options.fetchFn || fetch
 
@@ -468,4 +468,49 @@ export async function createPaytrLink(params, options = {}) {
     error_code: 'UNEXPECTED_PAYTR_STATUS',
     message: `PayTR beklenmeyen durum kodu döndü: ${rawJson?.status}`
   }
+}
+
+/**
+ * PayTR payment date parser.
+ * Primary field: payment_date (Turkish format DD.MM.YYYY or DD.MM.YYYY HH:mm:ss, or ISO format).
+ * Fallback field: auth_date (only if payment_date is empty).
+ * If only calendar day is present, preserves calendar day in Europe/Istanbul (+03:00) as T00:00:00+03:00 without fabricating fake hours.
+ * Returns ISO string or null.
+ */
+export function parsePaytrPaymentDate(paymentDateStr, authDateStr) {
+  const candidate = (paymentDateStr && String(paymentDateStr).trim()) ||
+                    (authDateStr && String(authDateStr).trim()) || null
+  if (!candidate) return null
+
+  // 1. DD.MM.YYYY HH:mm:ss
+  const trWithTime = /^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(candidate)
+  if (trWithTime) {
+    const [, day, month, year, hh, mm, ss] = trWithTime
+    return `${year}-${month}-${day}T${hh}:${mm}:${ss}+03:00`
+  }
+
+  // 2. DD.MM.YYYY (calendar day only)
+  const trDateOnly = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(candidate)
+  if (trDateOnly) {
+    const [, day, month, year] = trDateOnly
+    return `${year}-${month}-${day}T00:00:00+03:00`
+  }
+
+  // 3. YYYY-MM-DD HH:mm:ss
+  const isoWithTime = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(candidate)
+  if (isoWithTime) {
+    const [, year, month, day, hh, mm, ss] = isoWithTime
+    return `${year}-${month}-${day}T${hh}:${mm}:${ss}+03:00`
+  }
+
+  // 4. YYYY-MM-DD (calendar day only)
+  const isoDateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(candidate)
+  if (isoDateOnly) {
+    const [, year, month, day] = isoDateOnly
+    return `${year}-${month}-${day}T00:00:00+03:00`
+  }
+
+  // 5. Standard ISO 8601 string
+  const d = new Date(candidate)
+  return isNaN(d.getTime()) ? null : d.toISOString()
 }
