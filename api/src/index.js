@@ -19,6 +19,7 @@ import reportsRouter from './routes/reports.js'
 import authRouter from './routes/auth.js'
 import openingRouter from './routes/opening.js'
 import webhooksRouter from './routes/webhooks.js'
+import integrationsRouter from './routes/integrations.js'
 import { requireOpened } from './opening-guard.js'
 import jwt from 'jsonwebtoken'
 
@@ -95,6 +96,7 @@ app.use('/api/import', importRouter)
 app.use('/api/recipes', recipesRouter)
 app.use('/api/settings', settingsRouter)
 app.use('/api/reports', reportsRouter)
+app.use('/api/integrations', integrationsRouter)
 
 // 404
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
