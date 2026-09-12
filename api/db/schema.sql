@@ -781,3 +781,22 @@ CREATE TABLE IF NOT EXISTS integration_events (
 
 CREATE INDEX IF NOT EXISTS integration_events_provider_status_idx
   ON integration_events (provider, status, received_at DESC);
+
+-- ===========================================================================
+-- SİPARİŞ DIŞ SİSTEM REFERANSLARI (ORDER EXTERNAL REFS)
+-- Decco OS iç kimliği ile dış pazar yeri/e-ticaret kimliklerini bağlar
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS order_external_refs (
+  id          BIGSERIAL PRIMARY KEY,
+  order_id    INT NOT NULL REFERENCES orders(id),
+  provider    VARCHAR(50) NOT NULL,
+  external_id VARCHAR(255) NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT order_external_refs_provider_not_empty CHECK (length(trim(provider)) > 0),
+  CONSTRAINT order_external_refs_ext_id_not_empty CHECK (length(trim(external_id)) > 0),
+  CONSTRAINT order_external_refs_provider_canonical CHECK (provider = lower(trim(provider))),
+  CONSTRAINT order_external_refs_ext_id_canonical CHECK (external_id = trim(external_id)),
+  CONSTRAINT order_external_refs_provider_ext_uniq UNIQUE (provider, external_id),
+  CONSTRAINT order_external_refs_order_provider_uniq UNIQUE (order_id, provider)
+);
