@@ -800,3 +800,48 @@ CREATE TABLE IF NOT EXISTS order_external_refs (
   CONSTRAINT order_external_refs_provider_ext_uniq UNIQUE (provider, external_id),
   CONSTRAINT order_external_refs_order_provider_uniq UNIQUE (order_id, provider)
 );
+
+-- ===========================================================================
+-- MÜŞTERİ DIŞ SİSTEM REFERANSLARI (CUSTOMER EXTERNAL REFS)
+-- Kayıtlı dış müşteri kimlikleri ile Decco OS müşteri kartlarını bağlar
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS customer_external_refs (
+  id          BIGSERIAL PRIMARY KEY,
+  customer_id INT NOT NULL REFERENCES customers(id),
+  provider    VARCHAR(50) NOT NULL,
+  external_id VARCHAR(255) NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT customer_external_refs_provider_not_empty CHECK (length(trim(provider)) > 0),
+  CONSTRAINT customer_external_refs_ext_id_not_empty CHECK (length(trim(external_id)) > 0),
+  CONSTRAINT customer_external_refs_provider_canonical CHECK (provider = lower(trim(provider))),
+  CONSTRAINT customer_external_refs_ext_id_canonical CHECK (external_id = trim(external_id)),
+  CONSTRAINT customer_external_refs_provider_ext_uniq UNIQUE (provider, external_id),
+  CONSTRAINT customer_external_refs_customer_provider_uniq UNIQUE (customer_id, provider)
+);
+
+-- ===========================================================================
+-- SİPARİŞ ADRES SNAPSHOTLARI (ORDER ADDRESSES)
+-- Sipariş anındaki teslimat (shipping) ve fatura (billing) adreslerini dondurur
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS order_addresses (
+  id           BIGSERIAL PRIMARY KEY,
+  order_id     INT NOT NULL REFERENCES orders(id),
+  address_type VARCHAR(20) NOT NULL,
+  first_name   VARCHAR(100),
+  last_name    VARCHAR(100),
+  company      VARCHAR(200),
+  phone        VARCHAR(30),
+  email        VARCHAR(150),
+  address_1    TEXT,
+  address_2    TEXT,
+  city         VARCHAR(100),
+  district     VARCHAR(100),
+  state        VARCHAR(100),
+  postcode     VARCHAR(20),
+  country      VARCHAR(10),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT order_addresses_type_check CHECK (address_type IN ('shipping', 'billing')),
+  CONSTRAINT order_addresses_order_type_uniq UNIQUE (order_id, address_type)
+);
