@@ -317,6 +317,25 @@ function renderList() {
   }).join('')
 }
 
+// Backend validation/hata kodları için kullanıcı dostu Türkçe mesaj eşleştirmesi
+const ERROR_CODE_MAP = {
+  unknown_sku: 'Ürün SKU’su Decco’da bulunamadı',
+  missing_sku: 'Ürünün SKU bilgisi eksik',
+  ambiguous_customer: 'Müşteri birden fazla kayıtla eşleşiyor',
+  unsupported_currency: 'Para birimi desteklenmiyor',
+  unsupported_order_total: 'Woo tutarı Decco fiyat yapısına güvenli aktarılamıyor',
+  unrepresentable_line_total: 'Woo tutarı Decco fiyat yapısına güvenli aktarılamıyor',
+  unsupported_order_status: 'Woo sipariş durumu henüz desteklenmiyor',
+  unsupported_paid_payment_method: 'Bu ödeme yöntemi için otomatik tahsilat desteklenmiyor',
+  inconsistent_paid_state: 'Woo ödeme bilgileri tutarsız',
+  linked_customer_inactive: 'Woo müşterisi pasif/silinmiş Decco müşterisine bağlı',
+  missing_customer_name: 'Woo siparişinde müşteri adı bulunamadı',
+  paytr_account_not_found: 'Aktif PayTR hesabı bulunamadı veya hesap yapılandırması geçersiz'
+}
+
+let currentInspectData = null
+let isImporting = false
+
 // İncele Modalı — Mevcut GET /api/integrations/woocommerce/events/:id/resolve çağrılır
 window.inspectEvent = async (eventId) => {
   openModal(`
@@ -331,7 +350,9 @@ window.inspectEvent = async (eventId) => {
 
   try {
     const data = await api(`/integrations/woocommerce/events/${eventId}/resolve`)
-    renderInspectModal(data)
+    const event = allEvents.find(e => Number(e.event_id) === Number(eventId)) || null
+    currentInspectData = { data, event }
+    renderInspectModal(data, event)
   } catch (err) {
     const body = document.querySelector('.modal-body')
     if (body) {
@@ -348,7 +369,7 @@ window.inspectEvent = async (eventId) => {
   }
 }
 
-function renderInspectModal(data) {
+function renderInspectModal(data, event) {
   const body = document.querySelector('.modal-body')
   if (!body) return
 
@@ -437,6 +458,41 @@ function renderInspectModal(data) {
     `
   }
 
+  // Alt aksiyon butonları
+  let actionButtonsHtml = ''
+  if (isAlreadyImported) {
+    actionButtonsHtml = `
+      <div>
+        <span class="chip chip-blue" style="font-size:.85rem;padding:6px 12px;font-weight:600">
+          ✓ Decco’ya Aktarıldı — ${deccoOrder}
+        </span>
+      </div>
+      <div>
+        <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+      </div>
+    `
+  } else if (isImportable) {
+    actionButtonsHtml = `
+      <div>
+        <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+      </div>
+      <div>
+        <button id="btn-import-order" class="btn btn-primary" onclick="window.confirmImportOrder(${data.event_id})">
+          📥 Decco’ya Aktar
+        </button>
+      </div>
+    `
+  } else {
+    actionButtonsHtml = `
+      <div>
+        <span class="chip chip-red" style="font-size:.8rem;padding:4px 10px">Aktarım Yapılamaz</span>
+      </div>
+      <div>
+        <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+      </div>
+    `
+  }
+
   body.innerHTML = `
     <!-- Özet Bilgiler -->
     <div class="resolver-box">
@@ -465,10 +521,170 @@ function renderInspectModal(data) {
     <div class="section-title" style="margin-top:16px;margin-bottom:8px">Sipariş Kalemleri (${lines.length})</div>
     ${linesTableHtml}
 
-    <div style="display:flex;justify-content:flex-end;margin-top:20px">
-      <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+      ${actionButtonsHtml}
     </div>
   `
+}
+
+// Sipariş Aktarım Onay Diyaloğu
+window.confirmImportOrder = (eventId) => {
+  const inspectInfo = currentInspectData && Number(currentInspectData.data?.event_id) === Number(eventId)
+    ? currentInspectData
+    : null
+  const data = inspectInfo?.data
+  const event = inspectInfo?.event || allEvents.find(e => Number(e.event_id) === Number(eventId))
+
+  const wooOrderNum = event?.woo_order_number ? `#${event.woo_order_number}` : (data?.woo_order_id ? `#${data.woo_order_id}` : `#${eventId}`)
+  const customerName = event?.customer_name || 'Misafir / Belirtilmemiş'
+  const customerContact = [event?.billing_email, event?.billing_phone].filter(Boolean).join(' · ')
+  const totalStr = event ? formatTotal(event.total, event.currency) : '—'
+  const wooStatus = event?.woo_status || '—'
+  const paymentMethod = event?.payment_method_title || '—'
+
+  const lines = Array.isArray(data?.lines) ? data.lines : []
+  const itemsSummary = lines.length
+    ? lines.map(l => `${l.quantity || 1}x ${l.product_name || l.name || l.sku || 'Ürün'}`).join(', ')
+    : `${event?.line_count || 0} kalem`
+
+  openModal(`
+    <div class="modal-header">
+      <h3>Sipariş Aktarım Onayı</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px">
+      <div style="font-size:.88rem;color:var(--text-secondary);margin-bottom:14px">
+        Aşağıdaki WooCommerce siparişi Decco OS siparişine dönüştürülecektir. Lütfen bilgileri kontrol edin:
+      </div>
+
+      <div class="resolver-box" style="margin-bottom:14px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;font-size:.85rem">
+          <div class="meta-item">
+            <span class="meta-label">Woo Sipariş No</span>
+            <span class="meta-val td-mono" style="color:var(--primary)">${wooOrderNum}</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Toplam Tutar</span>
+            <span class="meta-val td-mono td-bold">${totalStr}</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Müşteri</span>
+            <span class="meta-val">${customerName}</span>
+            ${customerContact ? `<span style="font-size:.73rem;color:var(--text-secondary)">${customerContact}</span>` : ''}
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Woo Durumu</span>
+            <span class="meta-val td-mono">${wooStatus}</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Ödeme Yöntemi</span>
+            <span class="meta-val td-mono">${paymentMethod}</span>
+          </div>
+          <div class="meta-item" style="grid-column:1/-1">
+            <span class="meta-label">Ürün / Adet Özeti</span>
+            <span class="meta-val" style="font-weight:normal">${itemsSummary}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="err-callout" style="background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.3);margin-bottom:16px">
+        <div class="err-title" style="color:var(--yellow)">⚠️ Önemli Uyarı</div>
+        <div style="font-size:.82rem;color:var(--text);line-height:1.4">
+          Bu işlem Decco OS’ta gerçek müşteri/sipariş kaydı oluşturacaktır. Ödenmiş PayTR siparişlerinde tahsilat PayTR hesabına da işlenebilir.
+        </div>
+      </div>
+
+      <div id="import-confirm-error" class="err-callout" style="display:none;margin-bottom:16px"></div>
+
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;flex-wrap:wrap">
+        <button id="btn-cancel-import" class="btn btn-secondary" onclick="window.inspectEvent(${eventId})">Vazgeç</button>
+        <button id="btn-confirm-import" class="btn btn-primary" onclick="window.executeImportOrder(${eventId})">
+          Aktarımı Onayla
+        </button>
+      </div>
+    </div>
+  `)
+}
+
+// POST /api/integrations/woocommerce/events/:eventId/import çağrısı
+window.executeImportOrder = async (eventId) => {
+  if (isImporting) return
+  isImporting = true
+
+  const confirmBtn = document.getElementById('btn-confirm-import')
+  const cancelBtn = document.getElementById('btn-cancel-import')
+  const errBox = document.getElementById('import-confirm-error')
+
+  if (confirmBtn) {
+    confirmBtn.disabled = true
+    confirmBtn.innerHTML = '⏳ Aktarılıyor...'
+  }
+  if (cancelBtn) cancelBtn.disabled = true
+  if (errBox) errBox.style.display = 'none'
+
+  try {
+    const token = localStorage.getItem('decco_token')
+    const res = await fetch(`/api/integrations/woocommerce/events/${eventId}/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      }
+    })
+
+    if (res.status === 401) {
+      window.location.href = '/login.html'
+      return
+    }
+
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      const code = data.code || ''
+      const mapped = ERROR_CODE_MAP[code]
+      const msg = mapped ? `${mapped}` : (data.error || 'İçe aktarım başarısız oldu')
+      toast(msg, 'error')
+      if (errBox) {
+        errBox.style.display = 'block'
+        errBox.innerHTML = `
+          <div class="err-title">⚠️ Aktarım Hatası</div>
+          <div style="font-size:.82rem;color:var(--text)">
+            <b>${msg}</b>${data.error && data.error !== msg ? `<div style="margin-top:4px;color:var(--text-secondary)">${data.error}</div>` : ''}
+          </div>
+        `
+      }
+      return
+    }
+
+    // Başarılı yanıt
+    const orderDisplay = data.order_no ? `Sipariş #${data.order_no}` : (data.order_id ? `ID #${data.order_id}` : '')
+    if (data.already_imported) {
+      toast(`Sipariş zaten Decco’ya aktarılmış — ${orderDisplay}`, 'info')
+    } else {
+      toast(`Sipariş başarıyla Decco OS'a aktarıldı: ${orderDisplay}`, 'success')
+    }
+
+    // Listeyi güncelle ve inceleme modalını yeniden yükle
+    await loadEvents()
+    await window.inspectEvent(eventId)
+
+  } catch (err) {
+    toast(err.message || 'Bağlantı hatası oluştu', 'error')
+    if (errBox) {
+      errBox.style.display = 'block'
+      errBox.innerHTML = `
+        <div class="err-title">⚠️ Bağlantı Hatası</div>
+        <div style="font-size:.82rem;color:var(--text)">${err.message || 'Sunucuya bağlanılamadı'}</div>
+      `
+    }
+  } finally {
+    isImporting = false
+    if (confirmBtn) {
+      confirmBtn.disabled = false
+      confirmBtn.innerHTML = 'Aktarımı Onayla'
+    }
+    if (cancelBtn) cancelBtn.disabled = false
+  }
 }
 
 // Filtreler ve Arama Event Listener'ları
