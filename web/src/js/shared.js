@@ -25,7 +25,9 @@ export async function api(path, opts = {}) {
       ...opts.headers,
     },
     ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    body: opts.body !== undefined
+      ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body))
+      : undefined,
   })
   if (res.status === 401) { logout(); return }
   const data = await res.json().catch(() => ({}))
@@ -138,6 +140,7 @@ export function renderSidebar(active) {
     ['reports',    '📈', 'Raporlar',     '/reports.html'],
     ['section',    null, 'Entegrasyonlar', null],
     ['woocommerce','🔌', 'WooCommerce',  '/integrations-woocommerce.html'],
+    ['paytr',      '💳', 'PayTR',        '/integrations-paytr.html'],
     ['section',    null, 'Sistem',         null],
     ['settings',   '⚙️', 'Ayarlar',      '/settings.html'],
   ]

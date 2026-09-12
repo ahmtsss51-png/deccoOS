@@ -103,6 +103,10 @@ app.use((_req, res) => res.status(404).json({ error: 'Not found' }))
 
 // Global error handler
 app.use((err, _req, res, _next) => {
+  // Express body-parser JSON syntax error
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'Geçersiz JSON formatı', code: 'INVALID_JSON_BODY' })
+  }
   // Doğrulama hataları kendi durum kodunu ve mesajını taşır
   if (err.status && err.status < 500) {
     return res.status(err.status).json({ error: err.message })

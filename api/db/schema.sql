@@ -977,3 +977,91 @@ CREATE TABLE IF NOT EXISTS paytr_settlement_reconciliations (
 
 CREATE INDEX IF NOT EXISTS idx_paytr_settlement_reconciliations_settlement_id
   ON paytr_settlement_reconciliations(settlement_id);
+
+-- ===========================================================================
+-- PAYTR GEÇMİŞ İŞLEM DÖKÜMÜ & STAGING (HISTORICAL TRANSACTIONS & MATCHING)
+-- PayTR İşlem Dökümü API'sinden çekilen tarihsel hareketleri ve eşleme durumlarını saklar.
+-- Finansal mutasyon KESİNLİKLE YAPMAZ.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS paytr_history_fetches (
+  id                   SERIAL PRIMARY KEY,
+  requested_start_date DATE NOT NULL,
+  requested_end_date   DATE NOT NULL,
+  status               VARCHAR(30) NOT NULL, -- 'running', 'completed', 'partial', 'failed'
+  chunk_count          INT NOT NULL DEFAULT 0,
+  success_chunk_count  INT NOT NULL DEFAULT 0,
+  failed_chunk_count   INT NOT NULL DEFAULT 0,
+  error_summary        TEXT NULL,
+  fetched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_history_fetches_status_check CHECK (status IN ('running', 'completed', 'partial', 'failed'))
+);
+
+CREATE TABLE IF NOT EXISTS paytr_history_fetch_chunks (
+  id            SERIAL PRIMARY KEY,
+  fetch_id      INT NOT NULL REFERENCES paytr_history_fetches(id),
+  chunk_no      INT NOT NULL,
+  start_at      VARCHAR(30) NOT NULL,
+  end_at        VARCHAR(30) NOT NULL,
+  status        VARCHAR(20) NOT NULL, -- 'success', 'empty', 'failed'
+  row_count     INT NOT NULL DEFAULT 0,
+  error_code    VARCHAR(50) NULL,
+  error_message TEXT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_history_fetch_chunks_status_check CHECK (status IN ('success', 'empty', 'failed'))
+);
+
+CREATE TABLE IF NOT EXISTS paytr_history_transactions (
+  id                 SERIAL PRIMARY KEY,
+  transaction_type   VARCHAR(5) NOT NULL,
+  merchant_order_no  VARCHAR(255) NOT NULL,
+  transaction_amount NUMERIC(14,2) NOT NULL,
+  payment_amount     NUMERIC(14,2) NULL,
+  net_amount         NUMERIC(14,2) NOT NULL,
+  commission_amount  NUMERIC(14,2) NOT NULL,
+  commission_rate    NUMERIC(6,4) NULL,
+  transaction_date   DATE NOT NULL,
+  currency           VARCHAR(10) NOT NULL,
+  installment        SMALLINT NULL,
+  card_brand         VARCHAR(50) NULL,
+  masked_card        VARCHAR(30) NULL,
+  payment_type       VARCHAR(50) NULL,
+  source_signature   VARCHAR(64) NOT NULL,
+  occurrence_no      INT NOT NULL DEFAULT 1,
+  first_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_history_txns_type_check CHECK (transaction_type IN ('S', 'I')),
+  CONSTRAINT paytr_history_txns_sig_occ_uniq UNIQUE (source_signature, occurrence_no),
+  CONSTRAINT paytr_history_txns_amounts_nonneg CHECK (transaction_amount >= 0 AND net_amount >= 0 AND commission_amount >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS paytr_history_fetch_transactions (
+  fetch_id               INT NOT NULL REFERENCES paytr_history_fetches(id),
+  history_transaction_id INT NOT NULL REFERENCES paytr_history_transactions(id),
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (fetch_id, history_transaction_id)
+);
+
+CREATE TABLE IF NOT EXISTS paytr_history_matches (
+  id                     SERIAL PRIMARY KEY,
+  history_transaction_id INT NOT NULL UNIQUE REFERENCES paytr_history_transactions(id),
+  order_id               INT NULL REFERENCES orders(id),
+  payment_id             INT NULL REFERENCES customer_payments(id),
+  match_method           VARCHAR(50) NOT NULL,
+  confidence             VARCHAR(20) NOT NULL, -- 'exact', 'suggested', 'conflict', 'manual'
+  candidate_details      JSONB NULL,
+  confirmed_by_user      BOOLEAN NOT NULL DEFAULT false,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  confirmed_at           TIMESTAMPTZ NULL,
+  CONSTRAINT paytr_history_matches_confidence_check CHECK (confidence IN ('exact', 'suggested', 'conflict', 'manual'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_history_txns_merchant_order_no
+  ON paytr_history_transactions(merchant_order_no);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_history_txns_date
+  ON paytr_history_transactions(transaction_date);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_history_matches_order_id
+  ON paytr_history_matches(order_id);

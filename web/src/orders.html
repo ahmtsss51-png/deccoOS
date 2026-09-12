@@ -212,10 +212,38 @@ document.getElementById('search').addEventListener('input', e => {
 })
 
 window.openDetail = async (id) => {
-  const o = await api(`/orders/${id}`)
+  const [o, paytrLinksRes, paytrConfig] = await Promise.all([
+    api(`/orders/${id}`),
+    api(`/integrations/paytr/links?order_id=${id}&limit=1`).catch(() => ({ items: [] })),
+    api('/integrations/paytr/config').catch(() => null)
+  ])
   const kalan = parseFloat(o.total_amount||0) - parseFloat(o.paid_amount||0)
   const pct = Math.min(100, Math.round(parseFloat(o.paid_amount||0)/parseFloat(o.total_amount||1)*100))
   const statuses = ['draft','payment_pending','confirmed','production_pending','in_production','quality_check','ready','shipped','completed','cancelled']
+
+  const activeLink = (paytrLinksRes?.items && paytrLinksRes.items.length > 0) ? paytrLinksRes.items[0] : null
+  const isLinkActive = activeLink && ['creating', 'pending', 'create_unknown'].includes(activeLink.raw_link_status)
+
+  let paytrActionHtml = ''
+  if (kalan > 0.005) {
+    if (isLinkActive) {
+      if (activeLink.raw_link_status === 'create_unknown') {
+        paytrActionHtml = `<span class="chip chip-red" style="font-size:.75rem;padding:4px 8px" title="PayTR çağrısı belirsiz sonuçlandı, inceleme gerekir">⚠️ PayTR İnceleme</span>`
+      } else if (activeLink.can_copy_link && activeLink.link_url) {
+        paytrActionHtml = `<button class="btn btn-secondary btn-sm" onclick="copyPaytrLink('${activeLink.link_url}')" title="Ödeme Linkini Kopyala">🔗 Linki Kopyala</button>`
+      }
+      if (activeLink.can_query_status && activeLink.merchant_oid) {
+        paytrActionHtml += ` <button class="btn btn-secondary btn-sm" onclick="queryPaytrStatusOrder('${activeLink.merchant_oid}')" title="PayTR Durum Sorgula">🔍 PayTR</button>`
+      }
+    } else {
+      if (paytrConfig && !paytrConfig.can_create_link) {
+        paytrActionHtml = `<button class="btn btn-secondary btn-sm" disabled title="${paytrConfig.callback_message || 'Canlı PayTR bağlantısı sunucu kurulumu sonrası aktif edilecek'}" style="opacity:0.6;cursor:not-allowed">💳 PayTR Linki</button>`
+      } else if (paytrConfig && paytrConfig.can_create_link) {
+        paytrActionHtml = `<button class="btn btn-secondary btn-sm" onclick="openCreatePaytrLink(${o.id}, '${o.order_no}', ${kalan})">💳 PayTR Linki</button>`
+      }
+    }
+  }
+
   openModal(`
     <div class="modal-header">
       <h3>${o.order_no || 'Sipariş #' + o.id} — ${o.customer_name}</h3>
@@ -276,6 +304,7 @@ window.openDetail = async (id) => {
     <div class="modal-footer">
       <button class="btn btn-danger btn-sm" onclick="confirmDeleteOrder(${o.id})">Siparişi Sil</button>
       <div style="flex:1"></div>
+      ${paytrActionHtml}
       <button class="btn btn-secondary btn-sm" onclick="openPayment(${o.id},${o.total_amount},${o.paid_amount})">+ Ödeme Ekle</button>
       <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
     </div>
@@ -490,6 +519,120 @@ window.savePayment = async (id) => {
     closeModal()
     load()
   } catch(e) { toast(e.message,'error') }
+}
+
+window.copyPaytrLink = async (url) => {
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    toast('PayTR ödeme linki kopyalandı')
+  } catch {
+    toast('Link kopyalanamadı', 'error')
+  }
+}
+
+window.openCreatePaytrLink = (orderId, orderNo, remainingAmount) => {
+  openModal(`
+    <div class="modal-header">
+      <h3>PayTR Ödeme Linki Oluştur — #${orderNo}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:var(--surface-2);border-radius:8px;padding:12px 14px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Sipariş:</span>
+          <strong>#${orderNo}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Açık Kalan Tutar:</span>
+          <strong style="color:var(--primary);font-size:1.1rem">${money(remainingAmount)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Para Birimi:</span>
+          <span>TRY (Türk Lirası)</span>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label class="form-label">Maksimum Taksit Sayısı</label>
+        <select id="paytr-max-installment" class="form-control">
+          <option value="1">Tek Çekim (Taksitsiz)</option>
+          <option value="2">2 Taksit</option>
+          <option value="3">3 Taksit</option>
+          <option value="6">6 Taksit</option>
+          <option value="9">9 Taksit</option>
+          <option value="12">12 Taksit</option>
+        </select>
+      </div>
+      <div style="font-size:.78rem;color:var(--text-secondary)">
+        ℹ️ Ödeme linki tutarı siparişin kalan bakiyesinden exact cents ile backend tarafından hesaplanır.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Vazgeç</button>
+      <button class="btn btn-primary" id="btn-submit-paytr-link" onclick="submitCreatePaytrLink(${orderId})">Link Oluştur</button>
+    </div>
+  `, 'modal-sm')
+}
+
+window.submitCreatePaytrLink = async (orderId) => {
+  const btn = document.getElementById('btn-submit-paytr-link')
+  if (btn) {
+    btn.disabled = true
+    btn.textContent = 'Oluşturuluyor...'
+  }
+  const maxInst = parseInt(document.getElementById('paytr-max-installment')?.value || '1', 10)
+  try {
+    const res = await api(`/integrations/paytr/orders/${orderId}/create-link`, {
+      method: 'POST',
+      body: { max_installment: maxInst }
+    })
+    toast('PayTR linki başarıyla oluşturuldu')
+    closeModal()
+    window.openDetail(orderId)
+  } catch (err) {
+    toast(err.message || 'Link oluşturulamadı', 'error')
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = 'Link Oluştur'
+    }
+  }
+}
+
+window.queryPaytrStatusOrder = async (merchantOid) => {
+  if (!merchantOid) return
+  try {
+    const d = await api(`/integrations/paytr/status/${encodeURIComponent(merchantOid)}`)
+    const isSuccess = d.status === 'success'
+    openModal(`
+      <div class="modal-header">
+        <h3>PayTR Durum Sorgusu</h3>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Durum:</span>
+          <strong>${isSuccess ? '✅ Ödeme Başarılı' : '❌ ' + d.status}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Tutar:</span>
+          <strong>${money(d.payment_amount)} ${d.currency || 'TL'}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Taksit:</span>
+          <span>${d.taksit > 1 ? d.taksit + ' Taksit' : 'Tek Çekim'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:.85rem;color:var(--text-secondary)">Kart / Tip:</span>
+          <span>${d.kart_marka || d.odeme_tipi || 'Kart'} ${d.masked_pan ? `(${d.masked_pan})` : ''}</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal()">Kapat</button>
+      </div>
+    `, 'modal-sm')
+  } catch (err) {
+    toast(err.message || 'Durum sorgulanamadı', 'error')
+  }
 }
 
 // Yeni sipariş — adımlı modal

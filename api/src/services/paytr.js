@@ -528,3 +528,376 @@ export function parsePaytrPaymentDate(paymentDateStr, authDateStr) {
   const d = new Date(candidate)
   return isNaN(d.getTime()) ? null : d.toISOString()
 }
+
+/**
+ * Parses any date format from PayTR (DD.MM.YYYY, YYYY-MM-DD, with or without time)
+ * into a strict calendar date string: YYYY-MM-DD.
+ * Does NOT invent 00:00:00 or artificial timestamps (Correction #1).
+ */
+export function parsePaytrDateToCalendarDate(candidate) {
+  if (candidate == null) return null
+  const s = String(candidate).trim()
+  if (!s) return null
+
+  // 1. DD.MM.YYYY (e.g. "13.01.2021" or "13.01.2021 14:20:00")
+  const trMatch = /^(\d{2})\.(\d{2})\.(\d{4})/.exec(s)
+  if (trMatch) {
+    const [, day, month, year] = trMatch
+    return `${year}-${month}-${day}`
+  }
+
+  // 2. YYYY-MM-DD (e.g. "2021-01-13" or "2021-01-13 14:20:00")
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(s)
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch
+    return `${year}-${month}-${day}`
+  }
+
+  // 3. Fallback date parse
+  const d = new Date(s)
+  if (!isNaN(d.getTime())) {
+    return d.toISOString().slice(0, 10)
+  }
+
+  return null
+}
+
+/**
+ * Generates PayTR İşlem Dökümü report token.
+ * Token formula: merchant_id + start_date + end_date + merchant_salt with merchant_key
+ * Never logs secrets.
+ */
+export function generatePaytrReportToken({ merchantId, startDate, endDate, merchantSalt, merchantKey }) {
+  if (!merchantId || !startDate || !endDate || !merchantSalt || !merchantKey) {
+    throw new Error('PAYTR_CREDENTIALS_INCOMPLETE')
+  }
+  const hashStr = `${merchantId}${startDate}${endDate}${merchantSalt}`
+  return crypto.createHmac('sha256', merchantKey).update(hashStr).digest('base64')
+}
+
+/**
+ * Splits a date range (YYYY-MM-DD to YYYY-MM-DD) into consecutive, non-overlapping
+ * chunks of at most 3 calendar days (00:00:00 -> 23:59:59) in Europe/Istanbul time.
+ * Enforces maximum span of 93 days (Correction #9).
+ */
+export function splitDateRangeInto3DayChunks(startDateStr, endDateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDateStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endDateStr)) {
+    throw new Error('INVALID_DATE_FORMAT')
+  }
+
+  const start = new Date(`${startDateStr}T00:00:00Z`)
+  const end = new Date(`${endDateStr}T00:00:00Z`)
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    throw new Error('INVALID_DATE_VALUES')
+  }
+
+  if (start.getTime() > end.getTime()) {
+    throw new Error('START_DATE_AFTER_END_DATE')
+  }
+
+  const diffDays = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1
+  if (diffDays > 93) {
+    throw new Error('MAX_DATE_RANGE_EXCEEDED')
+  }
+
+  const chunks = []
+  let cur = new Date(start.getTime())
+  let chunkNo = 1
+
+  while (cur.getTime() <= end.getTime()) {
+    const chunkStartStr = cur.toISOString().slice(0, 10)
+    // Chunk end is cur + 2 days or final end date
+    const chunkEnd = new Date(cur.getTime())
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 2)
+    const effectiveEnd = chunkEnd.getTime() > end.getTime() ? new Date(end.getTime()) : chunkEnd
+    const chunkEndStr = effectiveEnd.toISOString().slice(0, 10)
+
+    chunks.push({
+      chunk_no: chunkNo++,
+      start_cal: chunkStartStr,
+      end_cal: chunkEndStr,
+      start_at: `${chunkStartStr} 00:00:00`,
+      end_at: `${chunkEndStr} 23:59:59`
+    })
+
+    // Advance cur to day after effectiveEnd
+    cur = new Date(effectiveEnd.getTime())
+    cur.setUTCDate(cur.getUTCDate() + 1)
+  }
+
+  return chunks
+}
+
+/**
+ * Computes deterministic canonical SHA-256 signature for a transaction item.
+ * Uses integer cents and canonical string formatting so "10" and "10.00" produce
+ * identical signatures (Correction #5).
+ */
+export function computeHistoryTransactionSignature(fields) {
+  const parts = [
+    fields.transaction_type, // 'S' or 'I'
+    (fields.merchant_order_no || '').trim(),
+    String(fields.transaction_amount_cents),
+    fields.payment_amount_cents != null ? String(fields.payment_amount_cents) : '',
+    String(fields.net_amount_cents),
+    String(fields.commission_amount_cents),
+    fields.commission_rate != null ? String(fields.commission_rate) : '',
+    fields.transaction_date, // 'YYYY-MM-DD'
+    (fields.currency || '').toUpperCase().trim(),
+    fields.installment != null ? String(fields.installment) : '',
+    fields.card_brand ? fields.card_brand.toUpperCase().trim() : '',
+    fields.masked_card ? fields.masked_card.trim() : '',
+    fields.payment_type ? fields.payment_type.toUpperCase().trim() : ''
+  ]
+  return crypto.createHash('sha256').update(parts.join('|'), 'utf8').digest('hex')
+}
+
+/**
+ * Executes PayTR İşlem Dökümü query for a given start_date and end_date window.
+ * Returns parsed, cents-validated transaction array.
+ * Treats status === 'failed' as empty window ({ ok: true, transactions: [] }) (Correction #2).
+ * Does NOT negate refund amounts (Correction #6).
+ */
+export async function queryPaytrTransactionReport(startDate, endDate, options = {}) {
+  const merchantId = options.merchantId !== undefined ? options.merchantId : process.env.PAYTR_MERCHANT_ID
+  const merchantKey = options.merchantKey !== undefined ? options.merchantKey : process.env.PAYTR_MERCHANT_KEY
+  const merchantSalt = options.merchantSalt !== undefined ? options.merchantSalt : process.env.PAYTR_MERCHANT_SALT
+  const endpoint = options.endpoint || process.env.PAYTR_REPORT_ENDPOINT || 'https://www.paytr.com/rapor/islem-dokumu'
+  const timeoutMs = options.timeoutMs || 10000
+  const fetchFn = options.fetchFn || fetch
+
+  if (!merchantId || !merchantKey || !merchantSalt) {
+    return {
+      ok: false,
+      error_code: 'PAYTR_CREDENTIALS_MISSING',
+      message: 'PayTR API kimlik bilgileri eksik'
+    }
+  }
+
+  let paytrToken
+  try {
+    paytrToken = generatePaytrReportToken({
+      merchantId,
+      startDate,
+      endDate,
+      merchantSalt,
+      merchantKey
+    })
+  } catch (err) {
+    return {
+      ok: false,
+      error_code: 'TOKEN_GENERATION_FAILED',
+      message: err.message
+    }
+  }
+
+  const formData = new URLSearchParams()
+  formData.append('merchant_id', String(merchantId))
+  formData.append('start_date', String(startDate))
+  formData.append('end_date', String(endDate))
+  formData.append('paytr_token', paytrToken)
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetchFn(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: formData.toString(),
+      signal: controller.signal
+    })
+
+    const text = await res.text()
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return {
+        ok: false,
+        error_code: 'INVALID_JSON_RESPONSE',
+        message: 'PayTR API geçersiz JSON yanıtı döndürdü'
+      }
+    }
+
+    if (!data || typeof data !== 'object') {
+      return {
+        ok: false,
+        error_code: 'INVALID_PAYLOAD',
+        message: 'PayTR API boş veya geçersiz nesne döndürdü'
+      }
+    }
+
+    // Official PayTR status handling:
+    // status === 'success' -> transactions present
+    // status === 'failed' -> empty window (no transactions) (Correction #2)
+    // status === 'error' -> actual API/query error
+
+    if (data.status === 'failed') {
+      return {
+        ok: true,
+        count: 0,
+        transactions: []
+      }
+    }
+
+    if (data.status === 'error') {
+      return {
+        ok: false,
+        error_code: 'PAYTR_REPORT_ERROR',
+        err_no: data.err_no != null ? String(data.err_no) : null,
+        message: data.err_msg || 'PayTR raporlama hatası'
+      }
+    }
+
+    if (data.status !== 'success') {
+      return {
+        ok: false,
+        error_code: 'PAYTR_UNKNOWN_STATUS',
+        message: `Bilinmeyen PayTR status yanıtı: ${data.status}`
+      }
+    }
+
+    const rawList = Array.isArray(data.data) ? data.data : (Array.isArray(data.transactions) ? data.transactions : [])
+    const parsedTransactions = []
+
+    for (let i = 0; i < rawList.length; i++) {
+      const it = rawList[i]
+      const txType = (it.islem_tipi || it.transaction_type || '').toString().trim().toUpperCase()
+      if (txType !== 'S' && txType !== 'I') {
+        return {
+          ok: false,
+          error_code: 'INVALID_TRANSACTION_TYPE',
+          message: `Satır ${i + 1}: Geçersiz işlem tipi (${txType})`
+        }
+      }
+
+      const merchantOrderNo = (it.siparis_no || it.merchant_oid || it.merchant_order_no || '').toString().trim()
+      if (!merchantOrderNo) {
+        return {
+          ok: false,
+          error_code: 'MISSING_MERCHANT_ORDER_NO',
+          message: `Satır ${i + 1}: siparis_no eksik`
+        }
+      }
+
+      // Amounts: integer cents parsing
+      const txAmtCents = parsePaytrMonetaryToCents(it.islem_tutari ?? it.tutar ?? it.transaction_amount)
+      if (txAmtCents == null) {
+        return {
+          ok: false,
+          error_code: 'INVALID_TRANSACTION_AMOUNT',
+          message: `Satır ${i + 1}: Geçersiz işlem tutarı`
+        }
+      }
+
+      const netAmtCents = parsePaytrMonetaryToCents(it.net_tutar ?? it.net_amount)
+      if (netAmtCents == null) {
+        return {
+          ok: false,
+          error_code: 'INVALID_NET_AMOUNT',
+          message: `Satır ${i + 1}: Geçersiz net tutar`
+        }
+      }
+
+      const commAmtCents = parsePaytrMonetaryToCents(it.komisyon_tutari ?? it.kesinti_tutari ?? it.commission_amount)
+      if (commAmtCents == null) {
+        return {
+          ok: false,
+          error_code: 'INVALID_COMMISSION_AMOUNT',
+          message: `Satır ${i + 1}: Geçersiz komisyon tutarı`
+        }
+      }
+
+      const payAmtRaw = it.payment_amount ?? it.odeme_tutari
+      const payAmtCents = payAmtRaw != null ? parsePaytrMonetaryToCents(payAmtRaw) : null
+
+      // Currency: MUST be present from provider (Correction #4)
+      const rawCurrency = (it.para_birimi || it.currency || '').toString().trim()
+      if (!rawCurrency) {
+        return {
+          ok: false,
+          error_code: 'MISSING_CURRENCY',
+          message: `Satır ${i + 1}: Para birimi eksik (varsayılan TL uydurulamaz)`
+        }
+      }
+
+      // Date: calendar date YYYY-MM-DD (Correction #1)
+      const calDate = parsePaytrDateToCalendarDate(it.tarih || it.islem_tarihi || it.transaction_date)
+      if (!calDate) {
+        return {
+          ok: false,
+          error_code: 'INVALID_TRANSACTION_DATE',
+          message: `Satır ${i + 1}: Geçersiz işlem tarihi`
+        }
+      }
+
+      // Installment: null or integer (0, 2..12) (Correction #4)
+      let installment = null
+      if (it.taksit != null && String(it.taksit).trim() !== '') {
+        const parsedInst = parseInt(String(it.taksit).trim(), 10)
+        if (!isNaN(parsedInst) && parsedInst >= 0 && parsedInst <= 12) {
+          installment = parsedInst
+        }
+      }
+
+      // Commission rate
+      let commRate = null
+      if (it.komisyon_orani != null && String(it.komisyon_orani).trim() !== '') {
+        const parsedRate = parseFloat(String(it.komisyon_orani).replace(',', '.'))
+        if (!isNaN(parsedRate) && parsedRate >= 0) {
+          commRate = (parsedRate / 100).toFixed(4)
+        }
+      }
+
+      const cardBrand = it.kart_marka != null ? String(it.kart_marka).trim() : null
+      const maskedCard = it.maskeli_kart != null ? String(it.maskeli_kart).trim() : (it.masked_card != null ? String(it.masked_card).trim() : null)
+      const paymentType = it.odeme_tipi != null ? String(it.odeme_tipi).trim() : (it.payment_type != null ? String(it.payment_type).trim() : null)
+
+      parsedTransactions.push({
+        transaction_type: txType,
+        merchant_order_no: merchantOrderNo,
+        transaction_amount_cents: txAmtCents,
+        transaction_amount: centsToDecimalString(txAmtCents),
+        payment_amount_cents: payAmtCents,
+        payment_amount: payAmtCents != null ? centsToDecimalString(payAmtCents) : null,
+        net_amount_cents: netAmtCents,
+        net_amount: centsToDecimalString(netAmtCents),
+        commission_amount_cents: commAmtCents,
+        commission_amount: centsToDecimalString(commAmtCents),
+        commission_rate: commRate,
+        transaction_date: calDate,
+        currency: rawCurrency.toUpperCase(),
+        installment,
+        card_brand: cardBrand,
+        masked_card: maskedCard,
+        payment_type: paymentType
+      })
+    }
+
+    return {
+      ok: true,
+      count: parsedTransactions.length,
+      transactions: parsedTransactions
+    }
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return {
+        ok: false,
+        error_code: 'TIMEOUT',
+        message: `PayTR İşlem Dökümü isteği zaman aşımına uğradı (${timeoutMs}ms)`
+      }
+    }
+    return {
+      ok: false,
+      error_code: 'NETWORK_ERROR',
+      message: err.message || 'PayTR ağ hatası'
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}

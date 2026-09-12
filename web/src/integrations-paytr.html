@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>PayTR Entegrasyonu — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .banner-box {
+      border-radius: var(--radius);
+      padding: 12px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: .85rem;
+    }
+    .banner-warning {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.3);
+      color: var(--yellow);
+    }
+    .banner-success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: var(--green);
+    }
+    .kpi-row-paytr {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .kpi-sub-warn {
+      color: var(--yellow) !important;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .modal-xl { max-width: 820px; }
+    .status-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .detail-item {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .detail-label {
+      font-size: .72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--text-secondary);
+    }
+    .detail-val {
+      font-size: .95rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .pipeline-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border-radius: 9999px;
+      font-size: .75rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .pipe-creating { background: rgba(148,163,184,.15); color: #94a3b8; }
+    .pipe-pending { background: rgba(59,130,246,.15); color: var(--blue); }
+    .pipe-needs_review { background: rgba(239,68,68,.15); color: var(--red); border: 1px solid rgba(239,68,68,.3); }
+    .pipe-awaiting_process { background: rgba(234,179,8,.15); color: var(--yellow); }
+    .pipe-awaiting_reconcile { background: rgba(168,85,247,.15); color: var(--purple, #a855f7); }
+    .pipe-awaiting_settlement { background: rgba(14,165,233,.15); color: #0ea5e9; }
+    .pipe-settled { background: rgba(34,197,94,.15); color: var(--green); }
+    .pipe-failed { background: rgba(239,68,68,.15); color: var(--red); }
+    .conf-exact { background: rgba(34,197,94,.15); color: var(--green); }
+    .conf-manual { background: rgba(59,130,246,.15); color: var(--blue); }
+    .conf-suggested { background: rgba(234,179,8,.15); color: var(--yellow); }
+    .conf-conflict { background: rgba(239,68,68,.15); color: var(--red); border: 1px solid rgba(239,68,68,.3); }
+    .conf-unmatched { background: rgba(148,163,184,.15); color: #94a3b8; }
+    .conf-refund { background: rgba(168,85,247,.15); color: var(--purple, #a855f7); }
+    .raw-badge {
+      font-size: .7rem;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+    .td-action {
+      text-align: right;
+      white-space: nowrap;
+    }
+    .action-group {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+    @media (max-width: 768px) {
+      .kpi-row-paytr { grid-template-columns: repeat(2, 1fr); }
+      .banner-box { flex-direction: column; align-items: flex-start; }
+    }
+    @media (max-width: 480px) {
+      .kpi-row-paytr { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div>
+      <h1>PayTR Entegrasyonu</h1>
+      <p style="color:var(--text-secondary);font-size:.83rem;margin-top:4px">
+        Ödeme linkleri, webhook tahsilatları, komisyon mutabakatları ve banka virmanları
+      </p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-secondary btn-sm" id="btn-refresh">🔄 Yenile</button>
+    </div>
+  </div>
+
+  <!-- Canlı Bağlantı / Config Durum Bannerı -->
+  <div id="connection-banner" class="banner-box banner-warning">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:1.2rem">⏳</span>
+      <div>
+        <strong id="banner-title">Bağlantı Durumu Yükleniyor...</strong>
+        <div id="banner-desc" style="font-size:.78rem;opacity:.9;margin-top:2px">Sistem yapılandırması kontrol ediliyor</div>
+      </div>
+    </div>
+    <div id="banner-badges" style="display:flex;gap:8px"></div>
+  </div>
+
+  <!-- KPI Sayaç Kartları -->
+  <div class="kpi-row-paytr">
+    <div class="card kpi-card">
+      <div class="kpi-title">PayTR Hesap Bakiyesi</div>
+      <div class="kpi-value" id="kpi-account-balance">₺0.00</div>
+      <div class="kpi-sub" id="kpi-tracked-balance">Link Takip: ₺0.00</div>
+      <div class="kpi-sub" id="kpi-unmatched-balance" style="display:none"></div>
+      <div class="kpi-icon" style="background:rgba(59,130,246,.1);color:var(--blue)">💳</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Bekleyen Linkler</div>
+      <div class="kpi-value" id="kpi-pending-count">0</div>
+      <div class="kpi-sub" id="kpi-pending-amount">₺0.00</div>
+      <div class="kpi-icon" style="background:rgba(59,130,246,.1);color:var(--blue)">⏳</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">İnceleme Gereken</div>
+      <div class="kpi-value" id="kpi-needs-review-count">0</div>
+      <div class="kpi-sub" id="kpi-needs-review-amount">₺0.00</div>
+      <div class="kpi-icon" style="background:rgba(239,68,68,.1);color:var(--red)">🔍</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Finansa İşlenecek</div>
+      <div class="kpi-value" id="kpi-awaiting-process-count">0</div>
+      <div class="kpi-sub" id="kpi-awaiting-process-amount">₺0.00</div>
+      <div class="kpi-icon" style="background:rgba(234,179,8,.1);color:var(--yellow)">📥</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Mutabakat Bekleyen</div>
+      <div class="kpi-value" id="kpi-awaiting-reconcile-count">0</div>
+      <div class="kpi-sub" id="kpi-awaiting-reconcile-amount">₺0.00</div>
+      <div class="kpi-icon" style="background:rgba(168,85,247,.1);color:var(--purple, #a855f7)">📊</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Virman Bekleyen</div>
+      <div class="kpi-value" id="kpi-awaiting-settlement-count">0</div>
+      <div class="kpi-sub" id="kpi-awaiting-settlement-net">₺0.00 Net</div>
+      <div class="kpi-icon" style="background:rgba(14,165,233,.1);color:#0ea5e9">🏦</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Bankaya Aktarılan</div>
+      <div class="kpi-value" id="kpi-settled-count">0</div>
+      <div class="kpi-sub" id="kpi-settled-net">₺0.00 Net</div>
+      <div class="kpi-icon" style="background:rgba(34,197,94,.1);color:var(--green)">✅</div>
+    </div>
+  </div>
+
+  <!-- Filtre Sekmeleri -->
+  <div class="filter-tabs" id="pipeline-tabs" style="margin-bottom:8px">
+    <button class="filter-tab active" data-status="">Tümü</button>
+    <button class="filter-tab" data-status="pending">Bekleyen</button>
+    <button class="filter-tab" data-status="needs_review">İnceleme Gereken</button>
+    <button class="filter-tab" data-status="awaiting_process">Finansa İşlenecek</button>
+    <button class="filter-tab" data-status="awaiting_reconcile">Mutabakat Bekleyen</button>
+    <button class="filter-tab" data-status="awaiting_settlement">Virman Bekleyen</button>
+    <button class="filter-tab" data-status="settled">Bankaya Aktarıldı</button>
+    <button class="filter-tab" data-status="failed">Başarısız / İptal</button>
+    <button class="filter-tab" data-status="settlements_view" style="margin-left:auto;background:var(--surface-2)">🏛️ Banka Virman Geçmişi</button>
+    <button class="filter-tab" data-status="history_view" style="background:var(--surface-2)">📜 Geçmiş İşlemler</button>
+  </div>
+
+  <!-- Arama Çubuğu (Yalnızca Link tablosunda görünür) -->
+  <div class="search-bar" id="search-container" style="margin-bottom:14px">
+    <span>🔍</span>
+    <input id="search-input" type="text" placeholder="Sipariş no, müşteri adı, telefon veya merchant_oid ara..." />
+  </div>
+
+  <!-- Link Tablosu -->
+  <div class="card" id="links-card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Sipariş No</th>
+            <th>Müşteri</th>
+            <th>Tutar</th>
+            <th>Link Durumu</th>
+            <th>Pipeline Durumu</th>
+            <th>Merchant OID</th>
+            <th>Tarih</th>
+            <th class="td-action">İşlem</th>
+          </tr>
+        </thead>
+        <tbody id="links-body">
+          <tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Settlements Tablosu (Gizli, sekmeyle açılır) -->
+  <div class="card" id="settlements-card" style="display:none">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Virman Ref</th>
+            <th>Hedef Banka</th>
+            <th>Banka Değer Tarihi</th>
+            <th>Brüt Tutar</th>
+            <th>Komisyon</th>
+            <th>Net Aktarılan</th>
+            <th>Banka Dekont / Ref</th>
+            <th>Mutabakat Sayısı</th>
+          </tr>
+        </thead>
+        <tbody id="settlements-body">
+          <tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Geçmiş İşlem Dökümü & Eşleme (Gizli, sekmeyle açılır) -->
+  <div class="card" id="history-card" style="display:none">
+    <!-- Üst Bilgi ve Çekme Toolbarı -->
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px">
+      <div>
+        <h3 style="margin:0 0 4px 0;font-size:1.05rem">PayTR İşlem Dökümü & Eşleştirme</h3>
+        <p style="margin:0;font-size:.8rem;color:var(--text-secondary)">
+          Resmi PayTR API'sinden geçmiş hareketleri çeker ve Decco siparişleriyle eşleştirir. <strong>Finansal bakiye asla otomatik değişmez.</strong>
+        </p>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px;font-size:.83rem">
+          <label for="hist-start-date" style="color:var(--text-secondary)">Başlangıç:</label>
+          <input type="date" id="hist-start-date" class="form-control" style="padding:4px 8px;font-size:.82rem;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface)" />
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:.83rem">
+          <label for="hist-end-date" style="color:var(--text-secondary)">Bitiş:</label>
+          <input type="date" id="hist-end-date" class="form-control" style="padding:4px 8px;font-size:.82rem;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface)" />
+        </div>
+        <button class="btn btn-primary btn-sm" id="btn-fetch-history">📥 PayTR'dan Getir</button>
+      </div>
+    </div>
+
+    <!-- 93 Gün Güvenlik Uyarısı Bannerı -->
+    <div style="padding:8px 20px;background:rgba(59,130,246,.08);border-bottom:1px solid var(--border);font-size:.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:8px">
+      <span>ℹ️</span>
+      <span>Tek sorguda maksimum <strong>93 günlük</strong> geçmiş taranabilir (API güvenliği için 3'er günlük parçalar halinde otomatik sorgulanır).</span>
+    </div>
+
+    <!-- Geçmiş İşlem KPI Sayaçları -->
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border)">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(130px, 1fr));gap:10px">
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;font-weight:600">Toplam İşlem</div>
+          <div id="kpi-hist-total" style="font-size:1.2rem;font-weight:700;margin-top:2px">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:var(--green);text-transform:uppercase;font-weight:600">Kesin Eşleşen</div>
+          <div id="kpi-hist-exact" style="font-size:1.2rem;font-weight:700;color:var(--green);margin-top:2px">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:var(--yellow);text-transform:uppercase;font-weight:600">Öneri (Heuristic)</div>
+          <div id="kpi-hist-suggested" style="font-size:1.2rem;font-weight:700;color:var(--yellow);margin-top:2px">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:var(--red);text-transform:uppercase;font-weight:600">Çakışma (Conflict)</div>
+          <div id="kpi-hist-conflict" style="font-size:1.2rem;font-weight:700;color:var(--red);margin-top:2px">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:#94a3b8;text-transform:uppercase;font-weight:600">Eşleşmeyen</div>
+          <div id="kpi-hist-unmatched" style="font-size:1.2rem;font-weight:700;color:#94a3b8;margin-top:2px">0</div>
+        </div>
+        <div class="card" style="padding:10px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="font-size:.72rem;color:var(--purple,#a855f7);text-transform:uppercase;font-weight:600">İadeler (I)</div>
+          <div id="kpi-hist-refund" style="font-size:1.2rem;font-weight:700;color:var(--purple,#a855f7);margin-top:2px">0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filtre Sekmeleri ve Arama -->
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px">
+      <div class="filter-tabs" id="history-sub-tabs" style="margin:0">
+        <button class="filter-tab active" data-hstatus="">Tümü</button>
+        <button class="filter-tab" data-hstatus="exact">Kesin / Manuel</button>
+        <button class="filter-tab" data-hstatus="suggested">Öneri</button>
+        <button class="filter-tab" data-hstatus="conflict">Çakışma</button>
+        <button class="filter-tab" data-hstatus="unmatched">Eşleşmeyen</button>
+        <button class="filter-tab" data-hstatus="refund">İadeler</button>
+      </div>
+      <div class="search-bar" style="margin:0;max-width:320px">
+        <span>🔍</span>
+        <input id="hist-search-input" type="text" placeholder="OID, sipariş no veya müşteri..." style="font-size:.82rem" />
+      </div>
+    </div>
+
+    <!-- Geçmiş Tablosu -->
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Tarih</th>
+            <th>Tip</th>
+            <th>Sipariş / Merchant OID</th>
+            <th>Tutar</th>
+            <th>Net / Komisyon</th>
+            <th>Kart / Taksit</th>
+            <th>Eşleşme Durumu</th>
+            <th class="td-action">İşlem</th>
+          </tr>
+        </thead>
+        <tbody id="history-body">
+          <tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Geçmiş işlem verisi yok. Yukarıdan tarih seçip "PayTR'dan Getir"e basabilirsiniz.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<div id="toast-container"></div>
+
+<script type="module">
+import { api, toast, openModal, closeModal, renderSidebar } from '/js/shared.js'
+
+// Navigasyon başlat
+renderSidebar('paytr')
+
+let currentStatusFilter = ''
+let searchTimer = null
+let appConfig = null
+
+const pipelineLabelMap = {
+  creating: ['pipe-creating', '⚙️ Oluşturuluyor'],
+  pending: ['pipe-pending', '⏳ Ödeme Bekleniyor'],
+  needs_review: ['pipe-needs_review', '⚠️ İnceleme Gerekiyor'],
+  awaiting_process: ['pipe-awaiting_process', '📥 Finansa İşlenecek'],
+  awaiting_reconcile: ['pipe-awaiting_reconcile', '📊 Mutabakat Bekliyor'],
+  awaiting_settlement: ['pipe-awaiting_settlement', '🏦 Virman Bekliyor'],
+  settled: ['pipe-settled', '✅ Bankaya Aktarıldı'],
+  failed: ['pipe-failed', '❌ Başarısız / İptal']
+}
+
+const rawStatusLabelMap = {
+  creating: 'Oluşturuluyor',
+  pending: 'Bekliyor',
+  create_unknown: 'Belirsiz',
+  paid: 'Ödendi',
+  cancelled: 'İptal',
+  expired: 'Süresi Doldu',
+  failed: 'Hatalı'
+}
+
+function fmtMoney(val) {
+  const n = parseFloat(val) || 0
+  return '₺' + n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function safeUserError(err, fallback = 'Bir hata oluştu') {
+  console.error('PayTR integration error:', err)
+  const msg = err?.message || ''
+  if (!msg) return fallback
+  if (
+    msg.includes('Unexpected token') ||
+    msg.includes('is not valid JSON') ||
+    msg.includes('JSON.parse') ||
+    msg.includes('SyntaxError') ||
+    msg.includes('Failed to fetch') ||
+    msg.includes('NetworkError')
+  ) {
+    return 'Sunucuyla iletişim kurulurken bir hata oluştu. Lütfen tekrar deneyin.'
+  }
+  return msg
+}
+
+// 1. Config Yükle
+async function loadConfig() {
+  try {
+    const cfg = await api('/integrations/paytr/config')
+    appConfig = cfg
+    const banner = document.getElementById('connection-banner')
+    const title = document.getElementById('banner-title')
+    const desc = document.getElementById('banner-desc')
+    const badges = document.getElementById('banner-badges')
+
+    if (cfg.callback_ready) {
+      banner.className = 'banner-box banner-success'
+      banner.querySelector('span').textContent = '🟢'
+      title.textContent = 'Canlı PayTR Bağlantısı Aktif'
+      desc.textContent = 'Sistem PayTR webhook ve Durum Sorgu çağrılarını doğrudan yönetiyor.'
+    } else {
+      banner.className = 'banner-box banner-warning'
+      banner.querySelector('span').textContent = '⚠️'
+      title.textContent = 'Canlı PayTR Bağlantısı Bekleniyor'
+      desc.textContent = cfg.callback_message || 'Canlı PayTR bağlantısı sunucu kurulumu sonrası aktif edilecek.'
+    }
+
+    badges.innerHTML = `
+      <span class="raw-badge" style="color:${cfg.account_ready ? 'var(--green)' : 'var(--red)'}">
+        ${cfg.account_ready ? 'PayTR Hesabı Hazır' : 'PayTR Hesabı Eksik'}
+      </span>
+      <span class="raw-badge" style="color:${cfg.system_open ? 'var(--green)' : 'var(--yellow)'}">
+        ${cfg.system_open ? 'Sistem Açık' : 'PRE-OPENING Modu'}
+      </span>
+    `
+  } catch (err) {
+    console.error('Config load failed:', err)
+  }
+}
+
+// 2. Summary Yükle
+async function loadSummary() {
+  try {
+    const s = await api('/integrations/paytr/summary')
+
+    // Hesap Kartı
+    const accBal = s.account ? fmtMoney(s.account.balance) : '₺0.00'
+    const trackedBal = s.account ? fmtMoney(s.account.pipeline_tracked_balance) : '₺0.00'
+    document.getElementById('kpi-account-balance').textContent = accBal
+    document.getElementById('kpi-tracked-balance').textContent = `Link Takip: ${trackedBal}`
+
+    const unmatchedEl = document.getElementById('kpi-unmatched-balance')
+    const unmatchedVal = parseFloat(s.account?.unmatched_balance || '0')
+    if (unmatchedVal > 0) {
+      unmatchedEl.style.display = 'block'
+      unmatchedEl.className = 'kpi-sub kpi-sub-warn'
+      unmatchedEl.textContent = `⚠️ Eşleşmeyen: ${fmtMoney(unmatchedVal)} (Woo/harici)`
+    } else {
+      unmatchedEl.style.display = 'none'
+    }
+
+    // Sayaçlar
+    document.getElementById('kpi-pending-count').textContent = s.pending_links.count
+    document.getElementById('kpi-pending-amount').textContent = fmtMoney(s.pending_links.amount)
+
+    document.getElementById('kpi-needs-review-count').textContent = s.needs_review_links.count
+    document.getElementById('kpi-needs-review-amount').textContent = fmtMoney(s.needs_review_links.amount)
+
+    document.getElementById('kpi-awaiting-process-count').textContent = s.awaiting_process.count
+    document.getElementById('kpi-awaiting-process-amount').textContent = fmtMoney(s.awaiting_process.amount)
+
+    document.getElementById('kpi-awaiting-reconcile-count').textContent = s.awaiting_reconcile.count
+    document.getElementById('kpi-awaiting-reconcile-amount').textContent = fmtMoney(s.awaiting_reconcile.amount)
+
+    document.getElementById('kpi-awaiting-settlement-count').textContent = s.awaiting_settlement.count
+    document.getElementById('kpi-awaiting-settlement-net').textContent = `${fmtMoney(s.awaiting_settlement.net_amount)} Net`
+
+    document.getElementById('kpi-settled-count').textContent = s.total_settled.count
+    document.getElementById('kpi-settled-net').textContent = `${fmtMoney(s.total_settled.net_amount)} Net`
+  } catch (err) {
+    console.error('Summary load failed:', err)
+  }
+}
+
+// 3. Link Listesi Yükle
+async function loadLinks() {
+  const tbody = document.getElementById('links-body')
+  tbody.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>'
+
+  try {
+    const params = new URLSearchParams()
+    if (currentStatusFilter) {
+      params.append('pipeline_status', currentStatusFilter)
+    }
+    const searchVal = document.getElementById('search-input').value.trim()
+    if (searchVal) {
+      params.append('search', searchVal)
+    }
+    params.append('limit', '50')
+
+    const res = await api(`/integrations/paytr/links?${params.toString()}`)
+    const items = res.items || []
+
+    if (items.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Kayıt bulunamadı</td></tr>'
+      return
+    }
+
+    tbody.innerHTML = items.map(it => {
+      const [pipeCls, pipeLabel] = pipelineLabelMap[it.pipeline_status] || ['pipe-creating', it.pipeline_status]
+      const rawStatusText = rawStatusLabelMap[it.raw_link_status] || it.raw_link_status
+
+      let actionsHtml = '<div class="action-group">'
+
+      // Durum Sorgula (SADECE merchant_oid varsa)
+      if (it.can_query_status && it.merchant_oid) {
+        actionsHtml += `<button class="btn btn-secondary btn-sm btn-action" data-action="status" data-oid="${it.merchant_oid}" title="PayTR Durum Sorgula">🔍 Sorgula</button>`
+      }
+
+      // Linki Kopyala (SADECE link_url varsa)
+      if (it.can_copy_link && it.link_url) {
+        actionsHtml += `<button class="btn btn-secondary btn-sm btn-action" data-action="copy" data-url="${it.link_url}" title="Ödeme Linkini Kopyala">🔗 Kopyala</button>`
+      }
+
+      // Finansa İşle (awaiting_process durumunda ve event_id varsa)
+      if (it.pipeline_status === 'awaiting_process' && it.event_id) {
+        actionsHtml += `<button class="btn btn-primary btn-sm btn-action" data-action="process" data-event-id="${it.event_id}" data-order="${it.order_no}" data-amount="${it.requested_amount}">📥 Finansa İşle</button>`
+      }
+
+      // Mutabakat Yap (awaiting_reconcile durumunda ve payment_id varsa)
+      if (it.pipeline_status === 'awaiting_reconcile' && it.payment_id) {
+        actionsHtml += `<button class="btn btn-secondary btn-sm btn-action" style="color:var(--purple, #a855f7);border-color:rgba(168,85,247,.4)" data-action="reconcile" data-payment-id="${it.payment_id}" data-oid="${it.merchant_oid || ''}" data-order="${it.order_no}">📊 Mutabakat</button>`
+      }
+
+      actionsHtml += '</div>'
+
+      return `
+        <tr>
+          <td><strong>#${it.order_no}</strong></td>
+          <td>
+            <div>${it.customer_name || '—'}</div>
+            <div style="font-size:.75rem;color:var(--text-secondary)">${it.customer_phone || ''}</div>
+          </td>
+          <td><strong>${fmtMoney(it.requested_amount)}</strong> <span style="font-size:.7rem;color:var(--text-secondary)">${it.currency}</span></td>
+          <td><span class="raw-badge">${rawStatusText}</span></td>
+          <td><span class="pipeline-badge ${pipeCls}">${pipeLabel}</span></td>
+          <td>
+            <span style="font-family:monospace;font-size:.78rem">${it.merchant_oid || '—'}</span>
+          </td>
+          <td style="font-size:.78rem;color:var(--text-secondary)">${fmtDate(it.created_at)}</td>
+          <td class="td-action">${actionsHtml}</td>
+        </tr>
+      `
+    }).join('')
+
+    // Action listener'larını bağla
+    tbody.querySelectorAll('.btn-action').forEach(btn => {
+      btn.addEventListener('click', handleTableAction)
+    })
+
+  } catch (err) {
+    console.error('Links load failed:', err)
+    tbody.innerHTML = `<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px;color:var(--red)">Hata: ${err.message}</td></tr>`
+  }
+}
+
+// 4. Settlements Geçmişi Yükle
+async function loadSettlements() {
+  const tbody = document.getElementById('settlements-body')
+  tbody.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>'
+
+  try {
+    const list = await api('/integrations/paytr/settlements')
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Kayıtlı banka virmanı bulunmuyor</td></tr>'
+      return
+    }
+
+    tbody.innerHTML = list.map(s => {
+      const recCount = Array.isArray(s.reconciliation_ids) ? s.reconciliation_ids.length : 0
+      return `
+        <tr>
+          <td><span style="font-family:monospace;font-size:.78rem;font-weight:600">${s.settlement_ref}</span></td>
+          <td><strong>${s.target_account_name || 'Banka Hesabı'}</strong></td>
+          <td style="font-size:.82rem">${fmtDate(s.bank_value_date)}</td>
+          <td>${fmtMoney(s.gross_amount)}</td>
+          <td style="color:var(--red)">-${fmtMoney(s.commission_amount)}</td>
+          <td><strong style="color:var(--green)">${fmtMoney(s.net_amount)}</strong></td>
+          <td><span style="font-family:monospace;font-size:.78rem">${s.bank_reference || '—'}</span></td>
+          <td><span class="raw-badge">${recCount} İşlem</span></td>
+        </tr>
+      `
+    }).join('')
+  } catch (err) {
+    console.error('Settlements load failed:', err)
+    tbody.innerHTML = `<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px;color:var(--red)">Hata: ${err.message}</td></tr>`
+  }
+}
+
+// Tablo Aksiyon Yönetimi
+async function handleTableAction(e) {
+  const btn = e.currentTarget
+  const action = btn.dataset.action
+
+  if (action === 'copy') {
+    const url = btn.dataset.url
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      toast('Ödeme linki panoya kopyalandı')
+    } catch {
+      toast('Link kopyalanamadı', 'error')
+    }
+    return
+  }
+
+  if (action === 'status') {
+    const oid = btn.dataset.oid
+    if (!oid) return
+    openStatusModal(oid)
+    return
+  }
+
+  if (action === 'process') {
+    const eventId = btn.dataset.eventId
+    const orderNo = btn.dataset.order
+    const amount = btn.dataset.amount
+    openProcessModal(eventId, orderNo, amount)
+    return
+  }
+
+  if (action === 'reconcile') {
+    const paymentId = btn.dataset.paymentId
+    const orderNo = btn.dataset.order
+    const oid = btn.dataset.oid
+    openReconcileModal(paymentId, orderNo, oid)
+    return
+  }
+}
+
+// Durum Sorgu Modalı (Sanitized Response)
+async function openStatusModal(merchantOid) {
+  openModal(`
+    <div style="padding:20px;text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:12px">⏳</div>
+      <div>PayTR Durum Sorgulanıyor...</div>
+      <div style="font-size:.78rem;color:var(--text-secondary);margin-top:4px">${merchantOid}</div>
+    </div>
+  `, 'modal-md')
+
+  try {
+    const data = await api(`/integrations/paytr/status/${encodeURIComponent(merchantOid)}`)
+    const isSuccess = data.status === 'success'
+
+    openModal(`
+      <div style="padding:4px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <h3 style="margin:0;font-size:1.1rem">PayTR Canlı Durum Sorgusu</h3>
+          <span class="pipeline-badge ${isSuccess ? 'pipe-settled' : 'pipe-failed'}">
+            ${isSuccess ? '✅ Başarılı Ödeme' : '❌ ' + data.status}
+          </span>
+        </div>
+
+        <div class="status-detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Merchant OID</span>
+            <span class="detail-val" style="font-family:monospace;font-size:.82rem">${data.merchant_oid}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Tahsilat Tutarı</span>
+            <span class="detail-val">${fmtMoney(data.payment_amount)} ${data.currency || 'TL'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">PayTR Kesintisi</span>
+            <span class="detail-val" style="color:var(--red)">-${fmtMoney(data.kesinti_tutari)}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Net Alacak Tutarı</span>
+            <span class="detail-val" style="color:var(--green)">${fmtMoney(data.net_tutar)}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Taksit Sayısı</span>
+            <span class="detail-val">${data.taksit > 1 ? data.taksit + ' Taksit' : 'Tek Çekim'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Kart / Ödeme Tipi</span>
+            <span class="detail-val">${data.kart_marka || data.odeme_tipi || 'Kart'} ${data.masked_pan ? `(${data.masked_pan})` : ''}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Ödeme Tarihi</span>
+            <span class="detail-val">${fmtDate(data.payment_date)}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">İade Adedi</span>
+            <span class="detail-val">${data.returns_count > 0 ? `⚠️ ${data.returns_count} İade Mevcut` : '0 İade'}</span>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:16px">
+          <button class="btn btn-secondary" id="btn-modal-close">Kapat</button>
+        </div>
+      </div>
+    `, 'modal-md')
+
+    document.getElementById('btn-modal-close').addEventListener('click', closeModal)
+
+  } catch (err) {
+    openModal(`
+      <div style="padding:16px">
+        <h3 style="color:var(--red);margin-bottom:8px">Sorgulama Hatası</h3>
+        <p style="font-size:.85rem">${err.message}</p>
+        <div style="display:flex;justify-content:flex-end;margin-top:16px">
+          <button class="btn btn-secondary" id="btn-modal-close">Kapat</button>
+        </div>
+      </div>
+    `, 'modal-sm')
+    document.getElementById('btn-modal-close').addEventListener('click', closeModal)
+  }
+}
+
+// Finansa İşleme Onay Modalı
+function openProcessModal(eventId, orderNo, amount) {
+  openModal(`
+    <div style="padding:4px">
+      <h3 style="margin-bottom:8px">Tahsilatı Finansa İşle</h3>
+      <p style="font-size:.85rem;color:var(--text-secondary);margin-bottom:16px">
+        <strong>#${orderNo}</strong> numaralı sipariş için alınan <strong>${fmtMoney(amount)}</strong> tutarındaki PayTR ödemesi, PayTR kart hesabına müşteri tahsilatı olarak kaydedilecektir.
+      </p>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary" id="btn-cancel-proc">Vazgeç</button>
+        <button class="btn btn-primary" id="btn-confirm-proc">📥 Finansa İşle</button>
+      </div>
+    </div>
+  `, 'modal-sm')
+
+  document.getElementById('btn-cancel-proc').addEventListener('click', closeModal)
+  const confirmBtn = document.getElementById('btn-confirm-proc')
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true
+    confirmBtn.textContent = 'İşleniyor...'
+
+    try {
+      const res = await api(`/integrations/paytr/events/${eventId}/process`, { method: 'POST' })
+      toast(res.message || 'Tahsilat başarıyla kaydedildi')
+      closeModal()
+      refreshAll()
+    } catch (err) {
+      toast(safeUserError(err, 'Finansal işlem başarısız'), 'error')
+      confirmBtn.disabled = false
+      confirmBtn.textContent = '📥 Finansa İşle'
+    }
+  })
+}
+
+// Komisyon Mutabakatı Onay Modalı
+function openReconcileModal(paymentId, orderNo, merchantOid) {
+  openModal(`
+    <div style="padding:4px">
+      <h3 style="margin-bottom:8px">PayTR Komisyon Mutabakatı</h3>
+      <p style="font-size:.85rem;color:var(--text-secondary);margin-bottom:16px">
+        <strong>#${orderNo}</strong> numaralı siparişin PayTR ödemesi canlı Durum Sorgu ile teyit edilerek hesaplanan komisyon tutarı PayTR hesabına Banka/Komisyon gideri olarak yazılacaktır.
+      </p>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary" id="btn-cancel-rec">Vazgeç</button>
+        <button class="btn btn-primary" id="btn-confirm-rec">📊 Mutabakatı Kaydet</button>
+      </div>
+    </div>
+  `, 'modal-sm')
+
+  document.getElementById('btn-cancel-rec').addEventListener('click', closeModal)
+  const confirmBtn = document.getElementById('btn-confirm-rec')
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true
+    confirmBtn.textContent = 'Doğrulanıyor...'
+
+    try {
+      const res = await api(`/integrations/paytr/payments/${paymentId}/reconcile`, { method: 'POST' })
+      toast(res.message || 'Komisyon mutabakatı başarıyla kaydedildi')
+      closeModal()
+      refreshAll()
+    } catch (err) {
+      toast(safeUserError(err, 'Mutabakat başarısız'), 'error')
+      confirmBtn.disabled = false
+      confirmBtn.textContent = '📊 Mutabakatı Kaydet'
+    }
+  })
+}
+
+function refreshAll() {
+  loadConfig()
+  loadSummary()
+  if (currentStatusFilter === 'history_view') {
+    loadHistory()
+  } else if (currentStatusFilter === 'settlements_view') {
+    loadSettlements()
+  } else {
+    loadLinks()
+  }
+}
+
+// -------------------------------------------------------------
+// GEÇMİŞ İŞLEM DÖKÜMÜ & EŞLEŞTİRME MODÜLÜ
+// -------------------------------------------------------------
+let currentHistStatusFilter = ''
+let histSearchTimer = null
+
+// Tarih kutularını hazırla (son 30 gün)
+const now = new Date()
+const past30 = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000))
+const endInput = document.getElementById('hist-end-date')
+const startInput = document.getElementById('hist-start-date')
+if (endInput && !endInput.value) endInput.value = now.toISOString().slice(0, 10)
+if (startInput && !startInput.value) startInput.value = past30.toISOString().slice(0, 10)
+
+async function loadHistory() {
+  const body = document.getElementById('history-body')
+  if (!body) return
+  body.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>'
+
+  const searchVal = document.getElementById('hist-search-input')?.value?.trim() || ''
+  const params = new URLSearchParams()
+  if (currentHistStatusFilter) params.append('status', currentHistStatusFilter)
+  if (searchVal) params.append('search', searchVal)
+  params.append('limit', '100')
+
+  try {
+    const res = await api(`/integrations/paytr/history?${params.toString()}`)
+    const summary = res.summary || {}
+    
+    // KPI sayaçlarını güncelle
+    const elTotal = document.getElementById('kpi-hist-total')
+    const elExact = document.getElementById('kpi-hist-exact')
+    const elSugg = document.getElementById('kpi-hist-suggested')
+    const elConf = document.getElementById('kpi-hist-conflict')
+    const elUnm = document.getElementById('kpi-hist-unmatched')
+    const elRef = document.getElementById('kpi-hist-refund')
+
+    if (elTotal) elTotal.textContent = summary.total_count || 0
+    if (elExact) elExact.textContent = summary.exact_count || 0
+    if (elSugg) elSugg.textContent = summary.suggested_count || 0
+    if (elConf) elConf.textContent = summary.conflict_count || 0
+    if (elUnm) elUnm.textContent = summary.unmatched_count || 0
+    if (elRef) elRef.textContent = summary.refund_count || 0
+
+    const list = res.data || []
+    if (list.length === 0) {
+      body.innerHTML = '<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px">Kriterlere uygun geçmiş işlem bulunamadı.</td></tr>'
+      return
+    }
+
+    body.innerHTML = list.map(it => {
+      const isRefund = it.transaction_type === 'I'
+      const typeBadge = isRefund
+        ? `<span class="pipeline-badge conf-refund">İade (I)</span>`
+        : `<span class="pipeline-badge pipe-settled">Satış (S)</span>`
+
+      let matchBadge = ''
+      if (isRefund) {
+        matchBadge = it.order_no
+          ? `<span class="pipeline-badge conf-refund">İade: #${it.order_no}</span>`
+          : `<span class="pipeline-badge conf-unmatched">İade (Eşleşmedi)</span>`
+      } else if (it.confidence === 'exact') {
+        matchBadge = `<span class="pipeline-badge conf-exact">✅ Kesin: #${it.order_no}</span>`
+      } else if (it.confidence === 'manual') {
+        matchBadge = `<span class="pipeline-badge conf-manual">👤 Manuel: #${it.order_no}</span>`
+      } else if (it.confidence === 'suggested') {
+        matchBadge = `<span class="pipeline-badge conf-suggested">💡 Öneri: #${it.order_no}</span>`
+      } else if (it.confidence === 'conflict') {
+        const cands = Array.isArray(it.candidate_details) ? it.candidate_details.length : 2
+        matchBadge = `<span class="pipeline-badge conf-conflict">⚠️ Çakışma (${cands} Aday)</span>`
+      } else {
+        matchBadge = `<span class="pipeline-badge conf-unmatched">Eşleşmedi</span>`
+      }
+
+      const installmentText = (it.installment != null && it.installment > 0)
+        ? `${it.installment} Taksit`
+        : (it.installment === 0 ? 'Tek Çekim' : '—')
+
+      const cardText = it.masked_card
+        ? `${it.card_brand || ''} ${it.masked_card}`.trim()
+        : (it.card_brand || '—')
+
+      const candidatesJson = encodeURIComponent(JSON.stringify(it.candidate_details || []))
+
+      return `
+        <tr>
+          <td style="font-size:.83rem;font-weight:600">${it.transaction_date || '—'}</td>
+          <td>${typeBadge}</td>
+          <td>
+            <div style="font-weight:600;font-size:.85rem">${it.merchant_order_no}</div>
+            ${it.customer_name ? `<div style="font-size:.75rem;color:var(--text-secondary)">${it.customer_name}</div>` : ''}
+          </td>
+          <td style="font-weight:600;font-size:.85rem">${fmtMoney(it.transaction_amount)} ${it.currency || 'TL'}</td>
+          <td style="font-size:.82rem">
+            <div style="color:var(--green)">Net: ${fmtMoney(it.net_amount)}</div>
+            <div style="color:var(--red);font-size:.75rem">Kom: -${fmtMoney(it.commission_amount)}</div>
+          </td>
+          <td style="font-size:.8rem;color:var(--text-secondary)">
+            <div>${cardText}</div>
+            <div>${installmentText}</div>
+          </td>
+          <td>${matchBadge}</td>
+          <td class="td-action">
+            <div class="action-group">
+              <button class="btn btn-secondary btn-sm"
+                data-action="hist-match"
+                data-id="${it.id}"
+                data-oid="${it.merchant_order_no}"
+                data-amount="${it.transaction_amount}"
+                data-date="${it.transaction_date}"
+                data-orderno="${it.order_no || ''}"
+                data-confidence="${it.confidence || ''}"
+                data-candidates="${candidatesJson}">
+                🔗 ${it.order_no ? 'Değiştir' : 'Eşleştir'}
+              </button>
+              ${!isRefund ? `
+                <button class="btn btn-secondary btn-sm"
+                  data-action="hist-verify"
+                  data-id="${it.id}"
+                  data-oid="${it.merchant_order_no}">
+                  🔍 Doğrula
+                </button>
+              ` : ''}
+            </div>
+          </td>
+        </tr>
+      `
+    }).join('')
+
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="8" class="td-muted" style="text-align:center;padding:36px;color:var(--red)">Hata: ${safeUserError(err, 'Yüklenemedi')}</td></tr>`
+  }
+}
+
+// PayTR'dan Geçmiş Çekme İsteği
+async function fetchHistoryFromPaytr() {
+  const startDate = document.getElementById('hist-start-date')?.value
+  const endDate = document.getElementById('hist-end-date')?.value
+
+  if (!startDate || !endDate) {
+    toast('Lütfen başlangıç ve bitiş tarihlerini seçin', 'error')
+    return
+  }
+
+  // 93 gün kontrolü
+  const s = new Date(`${startDate}T00:00:00Z`)
+  const e = new Date(`${endDate}T00:00:00Z`)
+  const diffDays = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1
+  if (diffDays > 93) {
+    toast('Tek seferde en fazla 93 günlük sorgu yapılabilir', 'error')
+    return
+  }
+  if (diffDays <= 0) {
+    toast('Başlangıç tarihi bitiş tarihinden önce olmalıdır', 'error')
+    return
+  }
+
+  const btn = document.getElementById('btn-fetch-history')
+  btn.disabled = true
+  btn.textContent = '📥 Çekiliyor...'
+
+  try {
+    const isMock = new URLSearchParams(window.location.search).get('mock') === '1' || window.__PAYTR_MOCK__
+    const fetchPath = isMock ? '/integrations/paytr/history/fetch?mock=1' : '/integrations/paytr/history/fetch'
+    const res = await api(fetchPath, {
+      method: 'POST',
+      body: { start_date: startDate, end_date: endDate }
+    })
+    toast(res.message || 'Geçmiş PayTR işlemleri başarıyla çekildi')
+    loadHistory()
+  } catch (err) {
+    toast(safeUserError(err, 'Geçmiş işlem çekme başarısız'), 'error')
+  } finally {
+    btn.disabled = false
+    btn.textContent = '📥 PayTR\'dan Getir'
+  }
+}
+
+// Manuel Eşleme Modalı (Sıfır Finansal Değişiklik Garantisi)
+function openManualMatchModal(historyId, merchantOid, amount, date, currentOrderNo, currentConfidence, candidates = []) {
+  let candidatesHtml = ''
+  if (candidates && candidates.length > 0) {
+    candidatesHtml = `
+      <div style="margin-bottom:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px">
+        <div style="font-size:.78rem;font-weight:600;margin-bottom:8px;color:var(--text-secondary)">
+          💡 Önerilen / Bulunan Aday Siparişler:
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${candidates.map(c => `
+            <button type="button" class="btn btn-secondary btn-sm candidate-select-btn"
+              data-orderid="${c.order_id}"
+              data-orderno="${c.order_no}"
+              style="text-align:left;display:flex;justify-content:space-between;align-items:center;padding:6px 10px">
+              <span><strong>#${c.order_no}</strong> — ${c.order_date || ''}</span>
+              <span style="font-weight:600">${fmtMoney(c.amount)}</span>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    `
+  }
+
+  openModal(`
+    <div style="padding:4px">
+      <h3 style="margin-bottom:8px">Geçmiş İşlem Sipariş Eşleme</h3>
+      
+      <div class="banner-box banner-warning" style="margin-bottom:14px">
+        <span>⚠️</span>
+        <div>
+          <strong>Finansal Güvenlik Garantisi:</strong>
+          Bu işlem geçmiş PayTR hareketini yalnızca ilgili Decco siparişiyle meta veri olarak bağlar. Siparişin tahsilatını (paid_amount) veya kasa/banka bakiyesini <strong>ASLA DEĞİŞTİRMEZ</strong>.
+        </div>
+      </div>
+
+      <div class="status-detail-grid" style="margin-bottom:14px">
+        <div class="detail-item">
+          <span class="detail-label">Merchant OID / Sipariş No</span>
+          <span class="detail-val" style="font-family:monospace;font-size:.85rem">${merchantOid}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">İşlem Tutarı</span>
+          <span class="detail-val">${fmtMoney(amount)}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">İşlem Tarihi</span>
+          <span class="detail-val">${date || '—'}</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Mevcut Durum</span>
+          <span class="detail-val">${currentOrderNo ? `#${currentOrderNo} (${currentConfidence})` : 'Eşleşmemiş'}</span>
+        </div>
+      </div>
+
+      ${candidatesHtml}
+
+      <div style="margin-bottom:16px">
+        <label style="display:block;font-size:.82rem;font-weight:600;margin-bottom:6px">Bağlanacak Decco Siparişi</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="manual-match-order-search" class="form-control" placeholder="Sipariş No (örn: 1042 veya 42)..." style="flex:1" />
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-search-order">Bul</button>
+        </div>
+        <div id="order-search-results" style="margin-top:8px;max-height:160px;overflow-y:auto;display:none"></div>
+        <input type="hidden" id="selected-target-order-id" />
+        <div id="selected-order-summary" style="margin-top:8px;font-size:.85rem;font-weight:600;color:var(--blue)"></div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary" id="btn-cancel-match">Vazgeç</button>
+        <button class="btn btn-primary" id="btn-confirm-match" disabled>🔗 Eşlemeyi Kaydet</button>
+      </div>
+    </div>
+  `, 'modal-md')
+
+  document.getElementById('btn-cancel-match').addEventListener('click', closeModal)
+  const confirmBtn = document.getElementById('btn-confirm-match')
+  const orderIdInput = document.getElementById('selected-target-order-id')
+  const orderSummary = document.getElementById('selected-order-summary')
+  const searchInput = document.getElementById('manual-match-order-search')
+  const searchResults = document.getElementById('order-search-results')
+
+  function selectOrder(orderId, orderNo, totalAmount) {
+    orderIdInput.value = orderId
+    orderSummary.textContent = `Seçilen: #${orderNo} (${fmtMoney(totalAmount)})`
+    confirmBtn.disabled = false
+    searchResults.style.display = 'none'
+  }
+
+  // Aday butonlarına tıklama
+  document.querySelectorAll('.candidate-select-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      selectOrder(b.dataset.orderid, b.dataset.orderno, 0)
+    })
+  })
+
+  // Sipariş Arama
+  async function searchOrders() {
+    const q = searchInput.value.trim()
+    if (!q) return
+    searchResults.innerHTML = '<div style="font-size:.8rem;color:var(--text-secondary);padding:6px">Aranıyor...</div>'
+    searchResults.style.display = 'block'
+
+    try {
+      const res = await api(`/orders?search=${encodeURIComponent(q)}&limit=10`)
+      const list = res.orders || res.data || (Array.isArray(res) ? res : [])
+      if (list.length === 0) {
+        searchResults.innerHTML = '<div style="font-size:.8rem;color:var(--text-secondary);padding:6px">Sipariş bulunamadı</div>'
+        return
+      }
+
+      searchResults.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:4px;border:1px solid var(--border);border-radius:var(--radius);padding:4px;background:var(--surface)">
+          ${list.map(o => `
+            <button type="button" class="btn btn-secondary btn-sm order-pick-row"
+              data-id="${o.id}" data-no="${o.order_no}" data-amount="${o.total_amount}"
+              style="text-align:left;display:flex;justify-content:space-between;align-items:center;padding:6px 8px">
+              <span>#${o.order_no} — ${o.customer_name || 'İsimsiz'}</span>
+              <span style="font-weight:600">${fmtMoney(o.total_amount)}</span>
+            </button>
+          `).join('')}
+        </div>
+      `
+
+      searchResults.querySelectorAll('.order-pick-row').forEach(row => {
+        row.addEventListener('click', () => {
+          selectOrder(row.dataset.id, row.dataset.no, row.dataset.amount)
+        })
+      })
+    } catch (err) {
+      searchResults.innerHTML = `<div style="font-size:.8rem;color:var(--red);padding:6px">Arama hatası: ${err.message}</div>`
+    }
+  }
+
+  document.getElementById('btn-search-order').addEventListener('click', searchOrders)
+  searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); searchOrders(); } })
+
+  // Eşleme Onay
+  confirmBtn.addEventListener('click', async () => {
+    const targetOrderId = orderIdInput.value
+    if (!targetOrderId) return
+
+    confirmBtn.disabled = true
+    confirmBtn.textContent = 'Kaydediliyor...'
+
+    try {
+      const res = await api(`/integrations/paytr/history/${historyId}/match`, {
+        method: 'POST',
+        body: { order_id: parseInt(targetOrderId, 10) }
+      })
+      toast(res.message || 'Geçmiş işlem siparişe başarıyla bağlandı')
+      closeModal()
+      loadHistory()
+    } catch (err) {
+      // 409 Exact match override conflict handling
+      if (err.message && err.message.includes('EXACT_MATCH_OVERRIDE_REQUIRES_REVIEW')) {
+        toast('Bu işlem kesin bir PayTR kimliği ile başka siparişe eşleştiği için doğrudan değiştirilemez!', 'error')
+      } else {
+        toast(safeUserError(err, 'Eşleme başarısız'), 'error')
+      }
+      confirmBtn.disabled = false
+      confirmBtn.textContent = '🔗 Eşlemeyi Kaydet'
+    }
+  })
+}
+
+// Canlı Durum Doğrulama Modalı (Tarih Hassasiyeti + Cents Eşleşmesi)
+async function openVerifyHistoryModal(historyId, merchantOid) {
+  openModal(`
+    <div style="padding:20px;text-align:center">
+      <div style="font-size:1.5rem;margin-bottom:12px">⏳</div>
+      <div>PayTR Durum Doğrulaması Yapılıyor...</div>
+      <div style="font-size:.78rem;color:var(--text-secondary);margin-top:4px">${merchantOid}</div>
+    </div>
+  `, 'modal-sm')
+
+  try {
+    const res = await api(`/integrations/paytr/history/${historyId}/verify`, { method: 'POST' })
+    const isVerified = res.verified === true
+
+    openModal(`
+      <div style="padding:4px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <h3 style="margin:0;font-size:1.1rem">PayTR Canlı Doğrulama</h3>
+          <span class="pipeline-badge ${isVerified ? 'pipe-settled' : 'pipe-failed'}">
+            ${isVerified ? '✅ Doğrulandı' : '⚠️ Uyuşmazlık Mevcut'}
+          </span>
+        </div>
+
+        <div class="status-detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Merchant OID</span>
+            <span class="detail-val" style="font-family:monospace;font-size:.82rem">${res.merchant_oid}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">PayTR Durumu</span>
+            <span class="detail-val">${res.status === 'success' ? 'Başarılı (success)' : res.status}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Tarih Karşılaştırması</span>
+            <span class="detail-val" style="color:${res.date_matched ? 'var(--green)' : 'var(--red)'}">
+              ${res.date_matched ? '✅ Aynı Gün Eşleşti' : '❌ Tarih Farklı'}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Tutar Karşılaştırması</span>
+            <span class="detail-val" style="color:${res.amount_matched ? 'var(--green)' : 'var(--red)'}">
+              ${res.amount_matched ? '✅ Kuruş Eşleşti' : '❌ Tutar Farklı'}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Para Birimi</span>
+            <span class="detail-val" style="color:${res.currency_matched ? 'var(--green)' : 'var(--red)'}">
+              ${res.currency_matched ? '✅ TL/TRY Uyumlu' : '❌ Para Birimi Farklı'}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">İade Durumu</span>
+            <span class="detail-val">${res.returns_count > 0 ? `⚠️ ${res.returns_count} İade Mevcut` : '0 İade'}</span>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:16px">
+          <button class="btn btn-secondary" id="btn-modal-close">Kapat</button>
+        </div>
+      </div>
+    `, 'modal-md')
+
+    document.getElementById('btn-modal-close').addEventListener('click', closeModal)
+  } catch (err) {
+    openModal(`
+      <div style="padding:16px">
+        <h3 style="color:var(--red);margin-bottom:8px">Doğrulama Hatası</h3>
+        <p style="font-size:.85rem">${err.message}</p>
+        <div style="display:flex;justify-content:flex-end;margin-top:16px">
+          <button class="btn btn-secondary" id="btn-modal-close">Kapat</button>
+        </div>
+      </div>
+    `, 'modal-sm')
+    document.getElementById('btn-modal-close').addEventListener('click', closeModal)
+  }
+}
+
+// History Olay Dinleyicileri
+const btnFetchHist = document.getElementById('btn-fetch-history')
+if (btnFetchHist) btnFetchHist.addEventListener('click', fetchHistoryFromPaytr)
+
+const histSearchInput = document.getElementById('hist-search-input')
+if (histSearchInput) {
+  histSearchInput.addEventListener('input', () => {
+    clearTimeout(histSearchTimer)
+    histSearchTimer = setTimeout(loadHistory, 300)
+  })
+}
+
+const histSubTabs = document.getElementById('history-sub-tabs')
+if (histSubTabs) {
+  histSubTabs.addEventListener('click', e => {
+    if (!e.target.classList.contains('filter-tab')) return
+    histSubTabs.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'))
+    e.target.classList.add('active')
+    currentHistStatusFilter = e.target.dataset.hstatus || ''
+    loadHistory()
+  })
+}
+
+const histBody = document.getElementById('history-body')
+if (histBody) {
+  histBody.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-action]')
+    if (!btn) return
+    const action = btn.dataset.action
+    const id = btn.dataset.id
+
+    if (action === 'hist-match') {
+      let candidates = []
+      try {
+        candidates = JSON.parse(decodeURIComponent(btn.dataset.candidates || '[]'))
+      } catch {}
+      openManualMatchModal(
+        id,
+        btn.dataset.oid,
+        btn.dataset.amount,
+        btn.dataset.date,
+        btn.dataset.orderno,
+        btn.dataset.confidence,
+        candidates
+      )
+    } else if (action === 'hist-verify') {
+      openVerifyHistoryModal(id, btn.dataset.oid)
+    }
+  })
+}
+
+// Event Listeners
+document.getElementById('btn-refresh').addEventListener('click', refreshAll)
+
+document.getElementById('search-input').addEventListener('input', () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(loadLinks, 300)
+})
+
+document.getElementById('pipeline-tabs').addEventListener('click', e => {
+  if (!e.target.classList.contains('filter-tab')) return
+  document.querySelectorAll('#pipeline-tabs .filter-tab').forEach(b => b.classList.remove('active'))
+  e.target.classList.add('active')
+
+  const status = e.target.dataset.status
+  currentStatusFilter = status
+
+  const linksCard = document.getElementById('links-card')
+  const settlementsCard = document.getElementById('settlements-card')
+  const historyCard = document.getElementById('history-card')
+  const searchContainer = document.getElementById('search-container')
+
+  if (status === 'history_view') {
+    linksCard.style.display = 'none'
+    settlementsCard.style.display = 'none'
+    searchContainer.style.display = 'none'
+    historyCard.style.display = 'block'
+    loadHistory()
+  } else if (status === 'settlements_view') {
+    linksCard.style.display = 'none'
+    historyCard.style.display = 'none'
+    searchContainer.style.display = 'none'
+    settlementsCard.style.display = 'block'
+    loadSettlements()
+  } else {
+    settlementsCard.style.display = 'none'
+    historyCard.style.display = 'none'
+    searchContainer.style.display = 'flex'
+    linksCard.style.display = 'block'
+    loadLinks()
+  }
+})
+
+// İlk Yükleme
+refreshAll()
+</script>
+</body>
+</html>

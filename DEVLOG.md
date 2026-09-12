@@ -346,3 +346,31 @@ docker exec decco_db pg_dump -U decco decco > backup_$(date +%Y%m%d).sql
 # Yedekten geri yükle
 docker exec -i decco_db psql -U decco decco < backup_YYYYMMDD.sql
 ```
+
+---
+
+## PayTR Entegrasyonu — Tarihsel İşlem Dökümü ve Eşleme (Historical Transactions & Matching) (2026-09-12)
+
+Resmi PayTR İşlem Dökümü API'si (`POST https://www.paytr.com/rapor/islem-dokumu`) entegrasyonu tamamlandı.
+
+### Temel Güvenlik Kuralı: SIFIR FİNANSAL MUTASYON (Zero Finance Mutation)
+Geçmiş PayTR hareketleri Decco OS içinde `customer_payments` veya `orders.paid_amount`'u ASLA otomatik değiştirmez; kasa/banka bakiyelerine dokunmaz. Yalnızca staging tablolarda saklanır ve Decco siparişleriyle meta veri olarak eşleştirilir/ilişkilendirilir.
+
+### Mimari İlkeler ve Düzeltmeler:
+1. **transaction_date**: Kesinlikle `DATE NOT NULL` (saat bilgisi uydurulmaz, 00:00:00 eklenmez).
+2. **status === 'failed'**: Boş pencere kabul edilir (`{ ok: true, count: 0, transactions: [] }`), `err_msg` metin kontrolüne bağlanmaz.
+3. **Audit Modeli**: `paytr_history_transactions` tablosunda tek `fetch_id` yerine `paytr_history_fetch_transactions` junction tablosu ve chunk bazlı hata takibi için `paytr_history_fetch_chunks` tablosu eklendi.
+4. **Finansal Doğruluk**: `installment` provider-native (`0` tek çekim, `2..12` taksitli, yoksa `null`, asla 1 varsayılmaz). `currency` sağlayıcıdan gelmek zorundadır (`TL` uydurulmaz). `CHECK (transaction_type IN ('S','I'))`.
+5. **Deterministic source_signature**: Kuruş bazlı tam sayı integer cents üzerinden canonical SHA-256 (`10` ve `10.00` aynı hash'i üretir). Response içi tekrarlar `occurrence_no` ile takip edilir.
+6. **İade (I) Tutarları**: Uygulama tarafında negatifleştirilmez, pozitif tutulur; yönü `transaction_type='I'` belirler.
+7. **Manuel Eşleme**: Mevcut suggested/conflict kaydı aynı satır üzerinde `confirmed_by_user=true` ile güncellenir. Otomatik kesin eşleşmeyi (`exact`) başka siparişe bağlama denemelerinde backend `409 EXACT_MATCH_OVERRIDE_REQUIRES_REVIEW` döner.
+8. **Konservatif Heuristic Eşleme**: Yalnızca tutar eşleşmesiyle öneri üretilmez. Tutar + takvim penceresi (+/- 7 gün) + PayTR tarihsel ödeme kanıtı aranır. Çoklu aday -> `conflict`.
+9. **Tarih Güvenlik Sınırı**: Tek fetch isteğinde maksimum 93 gün sorgulanabilir. 3'er günlük parçalar halinde sequential taranır.
+10. **Durum Doğrulama**: Calendar date eşitliği (saat farkı gözetilmeden), kuruş eşitliği ve TL/TRY denkliği kontrol edilir. `returns_count` döndürülür; `auth_code` ve tam returns frontend'e sızdırılmaz.
+11. **Serialization ve Güvenli Hata Yönetimi**:
+    - Request gövdesi tam olarak tek sefer JSON encode edilir (`{ start_date: 'YYYY-MM-DD', end_date: 'YYYY-MM-DD' }`).
+    - `web/src/js/shared.js` içindeki `api()` wrapper'ı `opts.body`'nin zaten string olup olmadığını kontrol ederek çift `JSON.stringify` uygulamasını engeller; `web/src/integrations-paytr.html` doğrudan plain object gönderir.
+    - Backend `POST /api/integrations/paytr/history/fetch` endpoint'i `req.body`'yi strict JS object olarak doğrular; string ise sessizce tekrar parse ederek problemi gizlemez, `400 INVALID_REQUEST_BODY` ile reddeder.
+    - Express `SyntaxError` (bozuk/çift tırnaklı JSON body) `api/src/index.js` global error handler'ında `400 INVALID_JSON_BODY` koduna sanitize edilir.
+    - UI toast katmanında `safeUserError` ile `Unexpected token`, `is not valid JSON`, `SyntaxError` gibi teknik detaylar filtrelenir; kullanıcıya güvenli Türkçe bildirim gösterilir, teknik detay console'da saklanır.
+    - Canlı PayTR upstream çağrısı yapılmadan önce non-production ortamında `?mock=1` query parametresi ve mock test desteği eklenmiş, browser subagent ile Network payload, status 200 ve toast temizliği doğrulanmıştır.

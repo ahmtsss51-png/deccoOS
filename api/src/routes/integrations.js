@@ -9,7 +9,12 @@ import {
   validatePaytrCallbackUrl,
   centsToDecimalString,
   parsePaytrPaymentDate,
-  parseDecimalToCents
+  parseDecimalToCents,
+  parsePaytrDateToCalendarDate,
+  generatePaytrReportToken,
+  splitDateRangeInto3DayChunks,
+  computeHistoryTransactionSignature,
+  queryPaytrTransactionReport
 } from '../services/paytr.js'
 import { isSystemOpen } from '../opening-guard.js'
 
@@ -858,6 +863,406 @@ router.post('/woocommerce/events/:eventId/import', async (req, res, next) => {
  * JWT-korumalı, salt-okunur PayTR Durum Sorgu endpoint'i.
  * Decco OS veritabanında KESİNLİKLE hiçbir finansal veya kayıt mutasyonu YAPMAZ.
  */
+/**
+ * GET /api/integrations/paytr/config
+ * Read-only configuration & readiness status for PayTR integration.
+ * NEVER returns sensitive credentials (merchant key/salt).
+ */
+router.get('/paytr/config', async (req, res, next) => {
+  try {
+    const merchantId = process.env.PAYTR_MERCHANT_ID
+    const merchantKey = process.env.PAYTR_MERCHANT_KEY
+    const merchantSalt = process.env.PAYTR_MERCHANT_SALT
+
+    const credentialsConfigured = Boolean(merchantId && merchantKey && merchantSalt)
+
+    const configuredCallbackUrl = process.env.PAYTR_LINK_CALLBACK_URL
+    const callbackValidation = validatePaytrCallbackUrl(configuredCallbackUrl)
+    const callbackReady = callbackValidation.valid
+
+    const callbackMessage = callbackReady
+      ? 'Canlı PayTR bağlantısı aktif'
+      : (callbackValidation.error_code === 'PAYTR_CALLBACK_URL_MISSING'
+          ? 'Canlı PayTR bağlantısı sunucu kurulumu sonrası aktif edilecek'
+          : callbackValidation.message || 'Canlı PayTR bağlantısı sunucu kurulumu sonrası aktif edilecek')
+
+    const { rows: accRows } = await query(
+      `SELECT id, name, balance, is_active FROM accounts WHERE name = 'PayTR' AND account_type = 'card' LIMIT 1`
+    )
+    const accountReady = accRows.length > 0 && accRows[0].is_active
+
+    const systemOpen = await isSystemOpen()
+
+    const canCreateLink = credentialsConfigured && callbackReady && accountReady && systemOpen
+
+    res.json({
+      credentials_configured: credentialsConfigured,
+      callback_ready: callbackReady,
+      callback_message: callbackMessage,
+      account_ready: accountReady,
+      paytr_account_id: accRows[0]?.id || null,
+      system_open: systemOpen,
+      can_create_link: canCreateLink
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/summary
+ * Consolidated KPI summary metrics for PayTR Dashboard.
+ * Accurately isolates PayTR Link pipeline from unrelated account payments.
+ * Computes pipeline_tracked_balance and unmatched_balance using exact integer cents.
+ */
+router.get('/paytr/summary', async (req, res, next) => {
+  try {
+    // 1. PayTR account
+    const { rows: accRows } = await query(
+      `SELECT id, name, balance, is_active FROM accounts WHERE name = 'PayTR' AND account_type = 'card' LIMIT 1`
+    )
+    const account = accRows[0] || null
+
+    // 2. Pending links (creating, pending, create_unknown)
+    const { rows: pendingRows } = await query(
+      `SELECT COUNT(*)::int AS count, COALESCE(SUM(requested_amount), 0)::numeric(14,2) AS amount
+       FROM paytr_payment_links
+       WHERE status IN ('pending', 'creating', 'create_unknown')`
+    )
+
+    // 3. Needs review links (create_unknown specifically)
+    const { rows: needsReviewRows } = await query(
+      `SELECT COUNT(*)::int AS count, COALESCE(SUM(requested_amount), 0)::numeric(14,2) AS amount
+       FROM paytr_payment_links
+       WHERE status = 'create_unknown'`
+    )
+
+    // 4. Awaiting customer payment creation (webhook received but no customer_payments yet)
+    const { rows: awaitProcessRows } = await query(
+      `SELECT COUNT(*)::int AS count,
+              COALESCE(SUM((ie.payload->>'total_amount')::numeric / 100), 0)::numeric(14,2) AS amount
+       FROM integration_events ie
+       WHERE ie.provider = 'paytr'
+         AND ie.event_type = 'link.payment.success'
+         AND ie.status = 'received'
+         AND NOT EXISTS (
+           SELECT 1 FROM payment_external_refs per
+           WHERE per.provider = 'paytr'
+             AND per.reference_type = 'merchant_oid'
+             AND per.external_id = ie.payload->>'merchant_oid'
+         )`
+    )
+
+    // 5. Awaiting commission reconciliation (in finance via paytr link, but not reconciled)
+    const { rows: awaitReconcileRows } = await query(
+      `SELECT COUNT(DISTINCT per.payment_id)::int AS count,
+              COALESCE(SUM(cp.amount), 0)::numeric(14,2) AS amount
+       FROM payment_external_refs per
+       JOIN customer_payments cp ON cp.id = per.payment_id
+       LEFT JOIN paytr_reconciliations pr ON pr.payment_id = per.payment_id
+       WHERE per.provider = 'paytr'
+         AND per.reference_type = 'merchant_oid'
+         AND pr.id IS NULL`
+    )
+
+    // 6. Awaiting bank settlement (reconciled, but no settlement junction)
+    const { rows: awaitSettlementRows } = await query(
+      `SELECT COUNT(pr.id)::int AS count,
+              COALESCE(SUM(pr.net_amount), 0)::numeric(14,2) AS net_amount,
+              COALESCE(SUM(pr.payment_amount), 0)::numeric(14,2) AS gross_amount,
+              COALESCE(SUM(pr.commission_amount), 0)::numeric(14,2) AS commission_amount
+       FROM paytr_reconciliations pr
+       LEFT JOIN paytr_settlement_reconciliations psr ON psr.reconciliation_id = pr.id
+       WHERE psr.id IS NULL`
+    )
+
+    // 7. Total settled to bank
+    const { rows: settledRows } = await query(
+      `SELECT COUNT(*)::int AS count,
+              COALESCE(SUM(net_amount), 0)::numeric(14,2) AS net_amount,
+              COALESCE(SUM(gross_amount), 0)::numeric(14,2) AS gross_amount
+       FROM paytr_settlements`
+    )
+
+    // 8. Pipeline tracked balance calculation (exact integer cents):
+    // link_payments - link_commissions - link_settled_net
+    const { rows: linkPayments } = await query(
+      `SELECT COALESCE(SUM(cp.amount), 0)::numeric(14,2) AS amount
+       FROM payment_external_refs per
+       JOIN customer_payments cp ON cp.id = per.payment_id
+       WHERE per.provider = 'paytr' AND per.reference_type = 'merchant_oid'`
+    )
+    const { rows: linkComms } = await query(
+      `SELECT COALESCE(SUM(commission_amount), 0)::numeric(14,2) AS amount
+       FROM paytr_reconciliations
+       WHERE commission_transaction_id IS NOT NULL`
+    )
+    const { rows: linkSettled } = await query(
+      `SELECT COALESCE(SUM(net_amount), 0)::numeric(14,2) AS amount
+       FROM paytr_settlements`
+    )
+
+    const paymentsCents = parseDecimalToCents(linkPayments[0]?.amount || '0') || 0
+    const commsCents = parseDecimalToCents(linkComms[0]?.amount || '0') || 0
+    const settledCents = parseDecimalToCents(linkSettled[0]?.amount || '0') || 0
+    const pipelineTrackedCents = Math.max(0, paymentsCents - commsCents - settledCents)
+
+    const accountBalanceCents = account ? (parseDecimalToCents(account.balance) || 0) : 0
+    const unmatchedCents = Math.max(0, accountBalanceCents - pipelineTrackedCents)
+
+    res.json({
+      account: account ? {
+        id: account.id,
+        name: account.name,
+        balance: account.balance,
+        is_active: account.is_active,
+        pipeline_tracked_balance: centsToDecimalString(pipelineTrackedCents),
+        unmatched_balance: centsToDecimalString(unmatchedCents)
+      } : null,
+      pending_links: {
+        count: pendingRows[0]?.count || 0,
+        amount: pendingRows[0]?.amount || '0.00'
+      },
+      needs_review_links: {
+        count: needsReviewRows[0]?.count || 0,
+        amount: needsReviewRows[0]?.amount || '0.00'
+      },
+      awaiting_process: {
+        count: awaitProcessRows[0]?.count || 0,
+        amount: awaitProcessRows[0]?.amount || '0.00'
+      },
+      awaiting_reconcile: {
+        count: awaitReconcileRows[0]?.count || 0,
+        amount: awaitReconcileRows[0]?.amount || '0.00'
+      },
+      awaiting_settlement: {
+        count: awaitSettlementRows[0]?.count || 0,
+        net_amount: awaitSettlementRows[0]?.net_amount || '0.00',
+        gross_amount: awaitSettlementRows[0]?.gross_amount || '0.00',
+        commission_amount: awaitSettlementRows[0]?.commission_amount || '0.00'
+      },
+      total_settled: {
+        count: settledRows[0]?.count || 0,
+        net_amount: settledRows[0]?.net_amount || '0.00',
+        gross_amount: settledRows[0]?.gross_amount || '0.00'
+      }
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/links
+ * Lists PayTR payment links with their orders, customer info, and derived mutually-exclusive pipeline_status.
+ * Supports filters: order_id, pipeline_status, search, limit, offset.
+ * Response: { items, total, limit, offset }
+ */
+router.get('/paytr/links', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100)
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0)
+    const orderId = req.query.order_id ? parseInt(req.query.order_id, 10) : null
+    const search = req.query.search ? String(req.query.search).trim() : null
+    const filterStatus = req.query.pipeline_status ? String(req.query.pipeline_status).trim() : null
+
+    let whereSql = 'WHERE 1=1'
+    const params = []
+
+    if (orderId && Number.isInteger(orderId)) {
+      params.push(orderId)
+      whereSql += ` AND pl.order_id = $${params.length}`
+    }
+
+    if (search) {
+      params.push(`%${search}%`)
+      whereSql += ` AND (o.order_no ILIKE $${params.length} OR c.name ILIKE $${params.length} OR c.phone ILIKE $${params.length} OR pl.merchant_oid ILIKE $${params.length})`
+    }
+
+    const pipelineCaseSql = `
+      CASE
+        WHEN pl.status IN ('failed', 'cancelled', 'expired') THEN 'failed'
+        WHEN pl.status = 'create_unknown' THEN 'needs_review'
+        WHEN pl.status = 'creating' THEN 'creating'
+        WHEN ps.id IS NOT NULL THEN 'settled'
+        WHEN pr.id IS NOT NULL THEN 'awaiting_settlement'
+        WHEN cp.id IS NOT NULL THEN 'awaiting_reconcile'
+        WHEN pl.status = 'paid' OR ie.id IS NOT NULL THEN 'awaiting_process'
+        ELSE 'pending'
+      END
+    `
+
+    let fullWhereSql = whereSql
+    if (filterStatus) {
+      params.push(filterStatus)
+      fullWhereSql += ` AND (${pipelineCaseSql}) = $${params.length}`
+    }
+
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+      FROM paytr_payment_links pl
+      JOIN orders o ON o.id = pl.order_id
+      JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN integration_events ie ON ie.provider = 'paytr'
+        AND ie.event_type = 'link.payment.success'
+        AND ie.payload->>'merchant_oid' = pl.merchant_oid
+      LEFT JOIN payment_external_refs per ON per.provider = 'paytr'
+        AND per.reference_type = 'merchant_oid'
+        AND per.external_id = pl.merchant_oid
+      LEFT JOIN customer_payments cp ON cp.id = per.payment_id
+      LEFT JOIN paytr_reconciliations pr ON pr.merchant_oid = pl.merchant_oid
+      LEFT JOIN paytr_settlement_reconciliations psr ON psr.reconciliation_id = pr.id
+      LEFT JOIN paytr_settlements ps ON ps.id = psr.settlement_id
+      ${fullWhereSql}
+    `
+    const { rows: countRows } = await query(countSql, params)
+    const total = countRows[0]?.total || 0
+
+    params.push(limit)
+    const limitIdx = params.length
+    params.push(offset)
+    const offsetIdx = params.length
+
+    const dataSql = `
+      SELECT
+        pl.id AS link_id,
+        pl.order_id,
+        o.order_no,
+        c.id AS customer_id,
+        c.name AS customer_name,
+        c.phone AS customer_phone,
+        c.email AS customer_email,
+        pl.callback_id,
+        pl.merchant_oid,
+        pl.requested_amount,
+        pl.currency,
+        pl.status AS raw_link_status,
+        pl.link_url,
+        pl.created_at,
+        pl.paid_at,
+        pl.expires_at,
+        ie.id AS event_id,
+        ie.status AS event_status,
+        cp.id AS payment_id,
+        cp.amount AS payment_amount,
+        cp.paid_at AS payment_date,
+        pr.id AS reconciliation_id,
+        pr.commission_amount,
+        pr.net_amount,
+        pr.reconciled_at,
+        ps.id AS settlement_id,
+        ps.settlement_ref,
+        ps.bank_value_date AS settlement_date,
+        (${pipelineCaseSql}) AS pipeline_status
+      FROM paytr_payment_links pl
+      JOIN orders o ON o.id = pl.order_id
+      JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN integration_events ie ON ie.provider = 'paytr'
+        AND ie.event_type = 'link.payment.success'
+        AND ie.payload->>'merchant_oid' = pl.merchant_oid
+      LEFT JOIN payment_external_refs per ON per.provider = 'paytr'
+        AND per.reference_type = 'merchant_oid'
+        AND per.external_id = pl.merchant_oid
+      LEFT JOIN customer_payments cp ON cp.id = per.payment_id
+      LEFT JOIN paytr_reconciliations pr ON pr.merchant_oid = pl.merchant_oid
+      LEFT JOIN paytr_settlement_reconciliations psr ON psr.reconciliation_id = pr.id
+      LEFT JOIN paytr_settlements ps ON ps.id = psr.settlement_id
+      ${fullWhereSql}
+      ORDER BY pl.created_at DESC, pl.id DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `
+
+    const { rows } = await query(dataSql, params)
+
+    const items = rows.map(r => {
+      const pStatus = r.pipeline_status
+      let nextAction = 'none'
+
+      if (pStatus === 'settled') {
+        nextAction = 'completed'
+      } else if (pStatus === 'awaiting_settlement') {
+        nextAction = 'awaiting_settlement'
+      } else if (pStatus === 'awaiting_reconcile') {
+        nextAction = 'reconcile'
+      } else if (pStatus === 'awaiting_process') {
+        if (r.event_id) {
+          nextAction = 'process_payment'
+        } else if (r.merchant_oid) {
+          nextAction = 'query_status'
+        } else {
+          nextAction = 'waiting_callback'
+        }
+      } else if (pStatus === 'needs_review') {
+        if (r.merchant_oid) {
+          nextAction = 'query_status'
+        } else {
+          nextAction = 'needs_review'
+        }
+      } else if (pStatus === 'pending') {
+        if (r.merchant_oid) {
+          nextAction = 'query_status'
+        } else if (r.link_url) {
+          nextAction = 'waiting_payment'
+        } else {
+          nextAction = 'waiting_payment'
+        }
+      }
+
+      const hasMerchantOid = Boolean(r.merchant_oid && r.merchant_oid.trim() !== '')
+      const canCopyLink = Boolean(r.link_url && r.link_url.trim() !== '' && !['failed', 'cancelled', 'expired'].includes(r.raw_link_status))
+
+      return {
+        link_id: r.link_id,
+        order_id: r.order_id,
+        order_no: r.order_no,
+        customer_id: r.customer_id,
+        customer_name: r.customer_name,
+        customer_phone: r.customer_phone,
+        customer_email: r.customer_email,
+        callback_id: r.callback_id,
+        merchant_oid: r.merchant_oid,
+        requested_amount: r.requested_amount,
+        currency: r.currency,
+        raw_link_status: r.raw_link_status,
+        pipeline_status: pStatus,
+        link_url: r.link_url,
+        can_copy_link: canCopyLink,
+        can_query_status: hasMerchantOid,
+        next_action: nextAction,
+        created_at: r.created_at,
+        paid_at: r.paid_at,
+        expires_at: r.expires_at,
+        event_id: r.event_id,
+        event_status: r.event_status,
+        payment_id: r.payment_id,
+        payment_amount: r.payment_amount,
+        payment_date: r.payment_date,
+        reconciliation_id: r.reconciliation_id,
+        commission_amount: r.commission_amount,
+        net_amount: r.net_amount,
+        reconciled_at: r.reconciled_at,
+        settlement_id: r.settlement_id,
+        settlement_ref: r.settlement_ref,
+        settlement_date: r.settlement_date
+      }
+    })
+
+    res.json({
+      items,
+      total,
+      limit,
+      offset
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/status/:merchantOid
+ * Canlı PayTR Durum Sorgu uç noktası (Salt Okunur).
+ * Frontend için güvenli, sanitize edilmiş veri projeksiyonu sunar (auth_code ve tam returns dizisi sızdırılmaz).
+ */
 router.get('/paytr/status/:merchantOid', async (req, res, next) => {
   try {
     const { merchantOid } = req.params
@@ -898,7 +1303,23 @@ router.get('/paytr/status/:merchantOid', async (req, res, next) => {
       })
     }
 
-    res.json(result.data)
+    const d = result.data
+    res.json({
+      status: d.status,
+      merchant_oid: d.merchant_oid,
+      payment_amount: d.payment_amount,
+      payment_total: d.payment_total,
+      net_tutar: d.net_tutar,
+      kesinti_tutari: d.kesinti_tutari,
+      payment_date: d.payment_date,
+      currency: d.currency,
+      taksit: d.taksit,
+      kart_marka: d.kart_marka,
+      masked_pan: d.masked_pan || null,
+      odeme_tipi: d.odeme_tipi,
+      test_mode: d.test_mode,
+      returns_count: Array.isArray(d.returns) ? d.returns.length : 0
+    })
   } catch (err) {
     next(err)
   }
@@ -912,6 +1333,13 @@ router.get('/paytr/status/:merchantOid', async (req, res, next) => {
  */
 router.post('/paytr/orders/:orderId/create-link', async (req, res, next) => {
   try {
+    if (!(await isSystemOpen())) {
+      return res.status(423).json({
+        error: 'Sistem PRE-OPENING modunda. Dış dünyaya ödeme talebi oluşturulamaz.',
+        code: 'PRE_OPENING_MODE'
+      })
+    }
+
     const orderId = parseInt(req.params.orderId, 10)
     if (!Number.isInteger(orderId) || orderId <= 0) {
       return res.status(400).json({ error: 'Geçersiz orderId', code: 'INVALID_ORDER_ID' })
@@ -2419,6 +2847,678 @@ router.get('/paytr/settlements', async (req, res, next) => {
       [limit]
     )
     res.json(rows)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ===========================================================================
+// PAYTR GEÇMİŞ İŞLEM DÖKÜMÜ & EŞLEME (HISTORICAL TRANSACTIONS & MATCHING)
+// ===========================================================================
+
+/**
+ * Automatically evaluates match candidates for a historical PayTR transaction.
+ * Pure relational metadata logic — NEVER modifies financial balances, paid_amounts or payments.
+ */
+async function autoMatchHistoryTransaction(client, historyTxn) {
+  const { id: historyId, merchant_order_no, transaction_amount, transaction_date } = historyTxn
+
+  // If already manually confirmed, do not overwrite
+  const { rows: existingRows } = await client.query(
+    `SELECT id, confidence, confirmed_by_user FROM paytr_history_matches WHERE history_transaction_id = $1`,
+    [historyId]
+  )
+  if (existingRows.length > 0 && (existingRows[0].confidence === 'manual' || existingRows[0].confirmed_by_user)) {
+    return
+  }
+
+  // Priority 1: Exact PayTR match (payment_external_refs or paytr_payment_links)
+  // 1a. payment_external_refs (merchant_oid)
+  const { rows: extRefRows } = await client.query(
+    `SELECT per.payment_id, cpa.order_id
+     FROM payment_external_refs per
+     LEFT JOIN customer_payment_allocations cpa ON cpa.payment_id = per.payment_id
+     WHERE per.provider = 'paytr' AND per.reference_type = 'merchant_oid' AND per.external_id = $1
+     LIMIT 1`,
+    [merchant_order_no]
+  )
+  if (extRefRows.length > 0 && extRefRows[0].order_id) {
+    const match = extRefRows[0]
+    await client.query(
+      `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence)
+       VALUES ($1, $2, $3, 'exact_payment_ref', 'exact')
+       ON CONFLICT (history_transaction_id)
+       DO UPDATE SET order_id = EXCLUDED.order_id, payment_id = EXCLUDED.payment_id,
+                     match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence`,
+      [historyId, match.order_id, match.payment_id]
+    )
+    return
+  }
+
+  // 1b. paytr_payment_links (merchant_oid)
+  const { rows: linkRows } = await client.query(
+    `SELECT pl.order_id, per.payment_id
+     FROM paytr_payment_links pl
+     LEFT JOIN payment_external_refs per ON per.provider = 'paytr' AND per.reference_type = 'merchant_oid' AND per.external_id = pl.merchant_oid
+     WHERE pl.merchant_oid = $1
+     LIMIT 1`,
+    [merchant_order_no]
+  )
+  if (linkRows.length > 0 && linkRows[0].order_id) {
+    const match = linkRows[0]
+    await client.query(
+      `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence)
+       VALUES ($1, $2, $3, 'exact_link_oid', 'exact')
+       ON CONFLICT (history_transaction_id)
+       DO UPDATE SET order_id = EXCLUDED.order_id, payment_id = EXCLUDED.payment_id,
+                     match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence`,
+      [historyId, match.order_id, match.payment_id || null]
+    )
+    return
+  }
+
+  // Priority 2: WooCommerce order external ref (SUGGESTED ONLY - Correction #8)
+  const { rows: wooRows } = await client.query(
+    `SELECT order_id FROM order_external_refs WHERE external_id = $1 LIMIT 1`,
+    [merchant_order_no]
+  )
+  if (wooRows.length > 0) {
+    await client.query(
+      `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence)
+       VALUES ($1, $2, NULL, 'woo_suggested', 'suggested')
+       ON CONFLICT (history_transaction_id)
+       DO UPDATE SET order_id = EXCLUDED.order_id, payment_id = EXCLUDED.payment_id,
+                     match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence`,
+      [historyId, wooRows[0].order_id]
+    )
+    return
+  }
+
+  // Check pattern e.g. ...PAYTRWOO(\d+)
+  const wooPattern = /PAYTRWOO(\d+)/i.exec(merchant_order_no)
+  if (wooPattern) {
+    const wooId = wooPattern[1]
+    const { rows: wooPatRows } = await client.query(
+      `SELECT order_id FROM order_external_refs WHERE external_id = $1 LIMIT 1`,
+      [wooId]
+    )
+    if (wooPatRows.length > 0) {
+      await client.query(
+        `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence)
+         VALUES ($1, $2, NULL, 'woo_suggested', 'suggested')
+         ON CONFLICT (history_transaction_id)
+         DO UPDATE SET order_id = EXCLUDED.order_id, payment_id = EXCLUDED.payment_id,
+                       match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence`,
+        [historyId, wooPatRows[0].order_id]
+      )
+      return
+    }
+  }
+
+  // Priority 3: Conservative Heuristic Match (Correction #8)
+  // Requires combination of exact amount + reasonable calendar window (+/- 7 days) + PayTR historical payment evidence
+  const { rows: candRows } = await client.query(
+    `SELECT o.id, o.order_no, o.total_amount, o.created_at::date AS order_date, cp.id AS payment_id
+     FROM orders o
+     JOIN customer_payment_allocations cpa ON cpa.order_id = o.id
+     JOIN customer_payments cp ON cp.id = cpa.payment_id
+     JOIN accounts a ON a.id = cp.account_id AND a.name = 'PayTR'
+     WHERE ABS(o.total_amount - $1::numeric) < 0.005
+       AND o.created_at::date BETWEEN ($2::date - INTERVAL '7 days') AND ($2::date + INTERVAL '7 days')
+     ORDER BY o.created_at DESC`,
+    [transaction_amount, transaction_date]
+  )
+
+  if (candRows.length === 1) {
+    await client.query(
+      `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence)
+       VALUES ($1, $2, $3, 'heuristic_suggested', 'suggested')
+       ON CONFLICT (history_transaction_id)
+       DO UPDATE SET order_id = EXCLUDED.order_id, payment_id = EXCLUDED.payment_id,
+                     match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence`,
+      [historyId, candRows[0].id, candRows[0].payment_id]
+    )
+    return
+  }
+
+  if (candRows.length > 1) {
+    const candidateDetails = candRows.map(c => ({
+      order_id: c.id,
+      order_no: c.order_no,
+      amount: c.total_amount,
+      order_date: c.order_date
+    }))
+    await client.query(
+      `INSERT INTO paytr_history_matches (history_transaction_id, order_id, payment_id, match_method, confidence, candidate_details)
+       VALUES ($1, NULL, NULL, 'multiple_candidates', 'conflict', $2::jsonb)
+       ON CONFLICT (history_transaction_id)
+       DO UPDATE SET order_id = NULL, payment_id = NULL,
+                     match_method = EXCLUDED.match_method, confidence = EXCLUDED.confidence,
+                     candidate_details = EXCLUDED.candidate_details`,
+      [historyId, JSON.stringify(candidateDetails)]
+    )
+    return
+  }
+}
+
+export function isPaytrHistoryMockAllowed() {
+  if (process.env.NODE_ENV === 'production') return false
+  return process.env.NODE_ENV === 'test' || process.env.PAYTR_HISTORY_MOCK_ENABLED === 'true'
+}
+
+/**
+ * POST /api/integrations/paytr/history/fetch
+ * Fetches historical PayTR transactions via official report endpoint.
+ * Chunks in up to 3 calendar day sequential windows (max 93 days total span).
+ * Deduplicates with SHA-256 source signature + occurrence counter.
+ * NEVER mutates existing financial balances or customer payments.
+ */
+router.post('/paytr/history/fetch', async (req, res, next) => {
+  try {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return res.status(400).json({
+        error: 'Geçersiz istek formatı. JSON nesnesi bekleniyor.',
+        code: 'INVALID_REQUEST_BODY'
+      })
+    }
+
+    const mockRequested = req.query?.mock === '1' || req.headers['x-mock-paytr'] === 'true' || Boolean(req.body?._mock_report)
+    if (mockRequested) {
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(400).json({
+          error: 'Mock modu production ortamında kullanılamaz',
+          code: 'MOCK_NOT_ALLOWED_IN_PRODUCTION'
+        })
+      }
+      if (!isPaytrHistoryMockAllowed()) {
+        return res.status(400).json({
+          error: 'PayTR mock modu aktif değil (PAYTR_HISTORY_MOCK_ENABLED=true gereklidir)',
+          code: 'PAYTR_MOCK_DISABLED'
+        })
+      }
+    }
+
+    const { start_date, end_date } = req.body
+    if (!start_date || !end_date) {
+      return res.status(400).json({
+        error: 'start_date ve end_date (YYYY-MM-DD) zorunludur',
+        code: 'MISSING_DATE_PARAMS'
+      })
+    }
+
+    let chunks
+    try {
+      chunks = splitDateRangeInto3DayChunks(start_date, end_date)
+    } catch (err) {
+      if (err.message === 'MAX_DATE_RANGE_EXCEEDED') {
+        return res.status(400).json({
+          error: 'Tek seferde en fazla 93 günlük geçmiş sorgulanabilir',
+          code: 'MAX_DATE_RANGE_EXCEEDED'
+        })
+      }
+      return res.status(400).json({
+        error: err.message,
+        code: 'INVALID_DATE_RANGE'
+      })
+    }
+
+    // 1. Insert fetch log
+    const { rows: fetchRows } = await query(
+      `INSERT INTO paytr_history_fetches (
+         requested_start_date, requested_end_date, status, chunk_count
+       ) VALUES ($1::date, $2::date, 'running', $3)
+       RETURNING id`,
+      [start_date, end_date, chunks.length]
+    )
+    const fetchId = fetchRows[0].id
+
+    let successChunks = 0
+    let failedChunks = 0
+    let totalTransactions = 0
+    let errorSummary = null
+
+    // 2. Sequential chunk processing (Correction #2, #3, #5)
+    for (const chunk of chunks) {
+      const testOptions = isPaytrHistoryMockAllowed() ? (req.body?._test_options || {}) : {}
+      if (isPaytrHistoryMockAllowed() && mockRequested) {
+        const mockData = req.body?._mock_report
+          ? (Array.isArray(req.body._mock_report)
+              ? req.body._mock_report[chunk.chunk_no - 1] || req.body._mock_report[0]
+              : req.body._mock_report)
+          : { status: 'failed', err_msg: 'İşlem bulunamadı' }
+        testOptions.fetchFn = async () => ({
+          ok: true,
+          status: 200,
+          json: async () => mockData,
+          text: async () => JSON.stringify(mockData)
+        })
+        testOptions.merchantId = testOptions.merchantId || 'test-mid'
+        testOptions.merchantKey = testOptions.merchantKey || 'test-key'
+        testOptions.merchantSalt = testOptions.merchantSalt || 'test-salt'
+      }
+
+      const reportRes = await queryPaytrTransactionReport(chunk.start_at, chunk.end_at, testOptions)
+
+      if (!reportRes.ok) {
+        failedChunks++
+        const errMsg = reportRes.message || 'Chunk fetch failed'
+        errorSummary = errorSummary ? `${errorSummary}; Chunk #${chunk.chunk_no}: ${errMsg}` : `Chunk #${chunk.chunk_no}: ${errMsg}`
+        await query(
+          `INSERT INTO paytr_history_fetch_chunks (
+             fetch_id, chunk_no, start_at, end_at, status, row_count, error_code, error_message
+           ) VALUES ($1, $2, $3, $4, 'failed', 0, $5, $6)`,
+          [fetchId, chunk.chunk_no, chunk.start_at, chunk.end_at, reportRes.error_code || 'REPORT_ERROR', errMsg]
+        )
+        continue
+      }
+
+      successChunks++
+      const txns = reportRes.transactions || []
+
+      if (txns.length === 0) {
+        await query(
+          `INSERT INTO paytr_history_fetch_chunks (
+             fetch_id, chunk_no, start_at, end_at, status, row_count
+           ) VALUES ($1, $2, $3, $4, 'empty', 0)`,
+          [fetchId, chunk.chunk_no, chunk.start_at, chunk.end_at]
+        )
+        continue
+      }
+
+      await query(
+        `INSERT INTO paytr_history_fetch_chunks (
+           fetch_id, chunk_no, start_at, end_at, status, row_count
+         ) VALUES ($1, $2, $3, $4, 'success', $5)`,
+        [fetchId, chunk.chunk_no, chunk.start_at, chunk.end_at, txns.length]
+      )
+
+      totalTransactions += txns.length
+
+      // Count occurrences within this chunk's response (Correction #3, #5)
+      const occurrenceMap = new Map()
+
+      for (const t of txns) {
+        const sig = computeHistoryTransactionSignature(t)
+        const occ = (occurrenceMap.get(sig) || 0) + 1
+        occurrenceMap.set(sig, occ)
+
+        // Upsert into paytr_history_transactions
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+
+          const { rows: insRows } = await client.query(
+            `INSERT INTO paytr_history_transactions (
+               transaction_type, merchant_order_no, transaction_amount, payment_amount,
+               net_amount, commission_amount, commission_rate, transaction_date, currency,
+               installment, card_brand, masked_card, payment_type, source_signature,
+               occurrence_no, first_seen_at, last_seen_at
+             ) VALUES (
+               $1, $2, $3::numeric, $4::numeric,
+               $5::numeric, $6::numeric, $7::numeric, $8::date, $9,
+               $10, $11, $12, $13, $14,
+               $15, NOW(), NOW()
+             )
+             ON CONFLICT (source_signature, occurrence_no)
+             DO UPDATE SET last_seen_at = NOW()
+             RETURNING id, transaction_type, merchant_order_no, transaction_amount, transaction_date, currency`,
+            [
+              t.transaction_type,
+              t.merchant_order_no,
+              t.transaction_amount,
+              t.payment_amount,
+              t.net_amount,
+              t.commission_amount,
+              t.commission_rate,
+              t.transaction_date,
+              t.currency,
+              t.installment,
+              t.card_brand,
+              t.masked_card,
+              t.payment_type,
+              sig,
+              occ
+            ]
+          )
+
+          const historyTxn = insRows[0]
+
+          // Link in junction table (Correction #3)
+          await client.query(
+            `INSERT INTO paytr_history_fetch_transactions (fetch_id, history_transaction_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [fetchId, historyTxn.id]
+          )
+
+          // Run relational auto matching
+          await autoMatchHistoryTransaction(client, historyTxn)
+
+          await client.query('COMMIT')
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {})
+          console.error('Error inserting history transaction:', err)
+        } finally {
+          client.release()
+        }
+      }
+    }
+
+    // Determine final fetch status (completed, partial, failed)
+    let finalStatus = 'completed'
+    if (failedChunks > 0 && successChunks === 0) {
+      finalStatus = 'failed'
+    } else if (failedChunks > 0 && successChunks > 0) {
+      finalStatus = 'partial'
+    }
+
+    await query(
+      `UPDATE paytr_history_fetches
+       SET status = $1, success_chunk_count = $2, failed_chunk_count = $3, error_summary = $4, fetched_at = NOW()
+       WHERE id = $5`,
+      [finalStatus, successChunks, failedChunks, errorSummary, fetchId]
+    )
+
+    res.json({
+      ok: true,
+      fetch_id: fetchId,
+      status: finalStatus,
+      chunk_count: chunks.length,
+      success_chunk_count: successChunks,
+      failed_chunk_count: failedChunks,
+      total_transactions: totalTransactions,
+      error_summary: errorSummary
+    })
+
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/history
+ * List historical transactions with their match status, order details, and summary counts.
+ * Supports filters: status ('exact', 'suggested', 'conflict', 'unmatched', 'refund'), search, limit, offset.
+ */
+router.get('/paytr/history', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100)
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0)
+    const statusFilter = req.query.status ? String(req.query.status).trim() : null
+    const search = req.query.search ? String(req.query.search).trim() : null
+
+    let whereSql = 'WHERE 1=1'
+    const params = []
+
+    if (statusFilter === 'refund') {
+      whereSql += ` AND pht.transaction_type = 'I'`
+    } else if (statusFilter === 'exact') {
+      whereSql += ` AND phm.confidence IN ('exact', 'manual') AND pht.transaction_type = 'S'`
+    } else if (statusFilter === 'suggested') {
+      whereSql += ` AND phm.confidence = 'suggested' AND pht.transaction_type = 'S'`
+    } else if (statusFilter === 'conflict') {
+      whereSql += ` AND phm.confidence = 'conflict' AND pht.transaction_type = 'S'`
+    } else if (statusFilter === 'unmatched') {
+      whereSql += ` AND phm.id IS NULL AND pht.transaction_type = 'S'`
+    }
+
+    if (search) {
+      params.push(`%${search}%`)
+      whereSql += ` AND (pht.merchant_order_no ILIKE $${params.length} OR o.order_no ILIKE $${params.length} OR c.name ILIKE $${params.length})`
+    }
+
+    // Summary counts query
+    const { rows: summaryRows } = await query(
+      `SELECT
+         COUNT(*)::int AS total_count,
+         COUNT(*) FILTER (WHERE phm.confidence IN ('exact', 'manual') AND pht.transaction_type = 'S')::int AS exact_count,
+         COUNT(*) FILTER (WHERE phm.confidence = 'suggested' AND pht.transaction_type = 'S')::int AS suggested_count,
+         COUNT(*) FILTER (WHERE phm.confidence = 'conflict' AND pht.transaction_type = 'S')::int AS conflict_count,
+         COUNT(*) FILTER (WHERE phm.id IS NULL AND pht.transaction_type = 'S')::int AS unmatched_count,
+         COUNT(*) FILTER (WHERE pht.transaction_type = 'I')::int AS refund_count
+       FROM paytr_history_transactions pht
+       LEFT JOIN paytr_history_matches phm ON phm.history_transaction_id = pht.id`
+    )
+
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+      FROM paytr_history_transactions pht
+      LEFT JOIN paytr_history_matches phm ON phm.history_transaction_id = pht.id
+      LEFT JOIN orders o ON o.id = phm.order_id
+      LEFT JOIN customers c ON c.id = o.customer_id
+      ${whereSql}
+    `
+    const { rows: countRows } = await query(countSql, params)
+    const total = countRows[0]?.total || 0
+
+    params.push(limit)
+    const limitIdx = params.length
+    params.push(offset)
+    const offsetIdx = params.length
+
+    const dataSql = `
+      SELECT
+        pht.id,
+        pht.transaction_type,
+        pht.merchant_order_no,
+        pht.transaction_amount,
+        pht.payment_amount,
+        pht.net_amount,
+        pht.commission_amount,
+        pht.commission_rate,
+        TO_CHAR(pht.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+        pht.currency,
+        pht.installment,
+        pht.card_brand,
+        pht.masked_card,
+        pht.payment_type,
+        pht.occurrence_no,
+        pht.first_seen_at,
+        pht.last_seen_at,
+        phm.id AS match_id,
+        phm.order_id,
+        phm.payment_id,
+        phm.match_method,
+        phm.confidence,
+        phm.candidate_details,
+        phm.confirmed_by_user,
+        o.order_no,
+        o.total_amount AS order_amount,
+        c.name AS customer_name
+      FROM paytr_history_transactions pht
+      LEFT JOIN paytr_history_matches phm ON phm.history_transaction_id = pht.id
+      LEFT JOIN orders o ON o.id = phm.order_id
+      LEFT JOIN customers c ON c.id = o.customer_id
+      ${whereSql}
+      ORDER BY pht.transaction_date DESC, pht.id DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `
+    const { rows } = await query(dataSql, params)
+
+    res.json({
+      data: rows,
+      items: rows,
+      total,
+      limit,
+      offset,
+      summary: summaryRows[0] || {
+        total_count: 0,
+        exact_count: 0,
+        suggested_count: 0,
+        conflict_count: 0,
+        unmatched_count: 0,
+        refund_count: 0
+      }
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/paytr/history/:id/match
+ * Manually links a historical PayTR transaction to a Decco order.
+ * Updates match record on the same row.
+ * Precludes casual override of exact matches (Correction #7).
+ * Strictly creates metadata relation; NEVER mutates order paid_amount or finance balances.
+ */
+router.post('/paytr/history/:id/match', async (req, res, next) => {
+  try {
+    const historyId = parseInt(req.params.id, 10)
+    const { order_id } = req.body || {}
+
+    if (!order_id || !Number.isInteger(Number(order_id))) {
+      return res.status(400).json({
+        error: 'Geçerli bir order_id belirtilmelidir',
+        code: 'INVALID_ORDER_ID'
+      })
+    }
+
+    const targetOrderId = parseInt(order_id, 10)
+
+    // 1. Verify history transaction exists
+    const { rows: histRows } = await query(
+      `SELECT id, transaction_type, merchant_order_no, transaction_amount FROM paytr_history_transactions WHERE id = $1`,
+      [historyId]
+    )
+    if (histRows.length === 0) {
+      return res.status(404).json({ error: 'Geçmiş PayTR işlemi bulunamadı', code: 'TRANSACTION_NOT_FOUND' })
+    }
+    const hist = histRows[0]
+
+    // 2. Verify target order exists and is not deleted
+    const { rows: orderRows } = await query(
+      `SELECT id, order_no, customer_id, total_amount, paid_amount, status, deleted_at FROM orders WHERE id = $1`,
+      [targetOrderId]
+    )
+    if (orderRows.length === 0 || orderRows[0].deleted_at) {
+      return res.status(404).json({ error: 'Sipariş bulunamadı veya silinmiş', code: 'ORDER_NOT_FOUND' })
+    }
+    const order = orderRows[0]
+
+    // 3. Check existing match
+    const { rows: matchRows } = await query(
+      `SELECT id, order_id, confidence FROM paytr_history_matches WHERE history_transaction_id = $1`,
+      [historyId]
+    )
+
+    if (matchRows.length > 0) {
+      const existing = matchRows[0]
+      // If it is an automatic EXACT match and user attempts to change to a DIFFERENT order,
+      // prevent casual override (Correction #7)
+      if (existing.confidence === 'exact' && existing.order_id !== targetOrderId) {
+        return res.status(409).json({
+          error: 'Bu işlem kesin bir PayTR kimliği ile başka bir siparişe eşleşmiştir. Manuel override için inceleme gereklidir.',
+          code: 'EXACT_MATCH_OVERRIDE_REQUIRES_REVIEW'
+        })
+      }
+
+      // Update existing row on same row (Correction #7)
+      await query(
+        `UPDATE paytr_history_matches
+         SET order_id = $1,
+             payment_id = NULL,
+             match_method = 'manual',
+             confidence = 'manual',
+             candidate_details = NULL,
+             confirmed_by_user = true,
+             confirmed_at = NOW()
+         WHERE id = $2`,
+        [targetOrderId, existing.id]
+      )
+    } else {
+      // Insert new match row
+      await query(
+        `INSERT INTO paytr_history_matches (
+           history_transaction_id, order_id, payment_id, match_method, confidence, confirmed_by_user, confirmed_at
+         ) VALUES ($1, $2, NULL, 'manual', 'manual', true, NOW())`,
+        [historyId, targetOrderId]
+      )
+    }
+
+    // ZERO finance mutation: orders.paid_amount, customer_payments, accounts.balance remain completely untouched!
+
+    res.json({
+      ok: true,
+      message: `Geçmiş işlem başarıyla #${order.order_no} siparişiyle eşleştirildi (Finansal bakiye değiştirilmedi)`,
+      order_id: targetOrderId,
+      order_no: order.order_no
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/paytr/history/:id/verify
+ * Performs on-demand Status Inquiry verification for a historical transaction.
+ * Compares calendar date, exact cents, and currency.
+ * Sanitized response: returns_count only, NO auth_code or full returns (Correction #10).
+ */
+router.post('/paytr/history/:id/verify', async (req, res, next) => {
+  try {
+    const historyId = parseInt(req.params.id, 10)
+    const { rows: histRows } = await query(
+      `SELECT id, merchant_order_no, transaction_amount, currency, TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date
+       FROM paytr_history_transactions WHERE id = $1`,
+      [historyId]
+    )
+    if (histRows.length === 0) {
+      return res.status(404).json({ error: 'Geçmiş PayTR işlemi bulunamadı', code: 'TRANSACTION_NOT_FOUND' })
+    }
+    const hist = histRows[0]
+
+    // Read-only queryPaytrStatus
+    const testOptions = req.body?._test_options || {}
+    if (process.env.NODE_ENV !== 'production' && req.body?._mock_status) {
+      testOptions.fetchFn = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => req.body._mock_status,
+        text: async () => JSON.stringify(req.body._mock_status)
+      })
+      testOptions.merchantId = testOptions.merchantId || 'test-mid'
+      testOptions.merchantKey = testOptions.merchantKey || 'test-key'
+      testOptions.merchantSalt = testOptions.merchantSalt || 'test-salt'
+    }
+
+    const result = await queryPaytrStatus(hist.merchant_order_no, testOptions)
+    if (!result.ok) {
+      return res.status(result.error_code === 'PAYTR_CREDENTIALS_MISSING' ? 500 : 422).json({
+        ok: false,
+        error: result.message || result.err_msg || 'Durum sorgulanamadı',
+        code: result.error_code
+      })
+    }
+
+    const d = result.data
+    // Compare calendar date (ignoring time) (Correction #10)
+    const dCalendarDate = parsePaytrDateToCalendarDate(d.payment_date)
+    const dateMatch = dCalendarDate === hist.transaction_date
+
+    // Compare cents
+    const histCents = parseDecimalToCents(hist.transaction_amount)
+    const amountMatch = d.payment_amount_cents === histCents
+
+    // Compare currency (TL === TRY)
+    const normalizeCurr = c => (c || '').toUpperCase().replace('TRY', 'TL')
+    const currencyMatch = normalizeCurr(d.currency) === normalizeCurr(hist.currency)
+
+    const verified = d.status === 'success' && dateMatch && amountMatch && currencyMatch
+
+    res.json({
+      ok: true,
+      verified,
+      status: d.status,
+      merchant_oid: d.merchant_oid,
+      payment_amount: d.payment_amount,
+      currency: d.currency,
+      payment_date: d.payment_date,
+      date_matched: dateMatch,
+      amount_matched: amountMatch,
+      currency_matched: currencyMatch,
+      returns_count: Array.isArray(d.returns) ? d.returns.length : 0
+    })
   } catch (err) {
     next(err)
   }
