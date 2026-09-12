@@ -939,3 +939,41 @@ CREATE TABLE IF NOT EXISTS paytr_reconciliations (
   CONSTRAINT paytr_reconciliations_payment_id_uniq UNIQUE (payment_id),
   CONSTRAINT paytr_reconciliations_merchant_oid_uniq UNIQUE (merchant_oid)
 );
+
+-- ===========================================================================
+-- PAYTR BANKA YATIŞI / VİRMAN MUTABAKATLARI (PAYTR SETTLEMENTS)
+-- PayTR net alacaklarının banka hesabına toplu virman kayıtlarını saklar
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS paytr_settlements (
+  id                  SERIAL PRIMARY KEY,
+  settlement_ref      VARCHAR(100) NOT NULL UNIQUE,
+  target_account_id   INT NOT NULL REFERENCES accounts(id),
+  gross_amount        NUMERIC(14,2) NOT NULL,
+  commission_amount   NUMERIC(14,2) NOT NULL,
+  net_amount          NUMERIC(14,2) NOT NULL,
+  transfer_ref        UUID NOT NULL UNIQUE,
+  bank_value_date     TIMESTAMPTZ NOT NULL,
+  bank_reference      VARCHAR(255) NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_settlements_gross_pos CHECK (gross_amount > 0),
+  CONSTRAINT paytr_settlements_commission_nonneg CHECK (commission_amount >= 0),
+  CONSTRAINT paytr_settlements_net_pos CHECK (net_amount > 0),
+  CONSTRAINT paytr_settlements_sum_check CHECK (gross_amount = net_amount + commission_amount),
+  CONSTRAINT paytr_settlements_ref_not_empty CHECK (length(trim(settlement_ref)) > 0),
+  CONSTRAINT paytr_settlements_bank_ref_not_empty CHECK (bank_reference IS NULL OR length(trim(bank_reference)) > 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS paytr_settlements_bank_ref_uniq
+  ON paytr_settlements (UPPER(TRIM(bank_reference))) WHERE bank_reference IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS paytr_settlement_reconciliations (
+  id                 BIGSERIAL PRIMARY KEY,
+  settlement_id      INT NOT NULL REFERENCES paytr_settlements(id),
+  reconciliation_id  INT NOT NULL REFERENCES paytr_reconciliations(id),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_settlement_reconciliations_uniq UNIQUE (reconciliation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_settlement_reconciliations_settlement_id
+  ON paytr_settlement_reconciliations(settlement_id);

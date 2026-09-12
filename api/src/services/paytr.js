@@ -215,6 +215,20 @@ export function centsToDecimalString(cents) {
 }
 
 /**
+ * Exact decimal-string to integer cents parser.
+ * Bypasses JavaScript floating-point arithmetic errors.
+ * Rejects negative numbers, non-numeric strings, and numbers with > 2 decimal places.
+ */
+export function parseDecimalToCents(val) {
+  if (val == null) return null
+  const s = String(val).trim()
+  if (!/^\d+(\.\d{1,2})?$/.test(s)) return null
+  const [intPart, decPart = ''] = s.split('.')
+  const cents = parseInt(intPart, 10) * 100 + parseInt(decPart.padEnd(2, '0'), 10)
+  return Number.isSafeInteger(cents) && cents >= 0 ? cents : null
+}
+
+/**
  * Validates PayTR callback URL according to official PayTR Link API specifications:
  * - Must start with http:// or https://
  * - Must NOT be localhost, 127.0.0.1, ::1, or *.localhost

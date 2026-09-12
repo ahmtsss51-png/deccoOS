@@ -2,31 +2,20 @@ import crypto from 'crypto'
 import { Router } from 'express'
 import { pool, query } from '../db.js'
 import { normalizePhone, PHONE_CANON_SQL } from './customers.js'
-import { applyCustomerPayment, recordAccountExpense } from './finance.js'
+import { applyCustomerPayment, recordAccountExpense, executeAccountTransfer } from './finance.js'
 import {
   queryPaytrStatus,
   createPaytrLink,
   validatePaytrCallbackUrl,
   centsToDecimalString,
-  parsePaytrPaymentDate
+  parsePaytrPaymentDate,
+  parseDecimalToCents
 } from '../services/paytr.js'
 import { isSystemOpen } from '../opening-guard.js'
 
-const router = Router()
+export { parseDecimalToCents }
 
-/**
- * Exact decimal-string to integer cents parser.
- * Bypasses JavaScript floating-point arithmetic errors.
- * Rejects negative numbers, non-numeric strings, and numbers with > 2 decimal places.
- */
-export function parseDecimalToCents(val) {
-  if (val == null) return null
-  const s = String(val).trim()
-  if (!/^\d+(\.\d{1,2})?$/.test(s)) return null
-  const [intPart, decPart = ''] = s.split('.')
-  const cents = parseInt(intPart, 10) * 100 + parseInt(decPart.padEnd(2, '0'), 10)
-  return Number.isSafeInteger(cents) && cents >= 0 ? cents : null
-}
+const router = Router()
 
 /**
  * Safe UTC date parser.
@@ -1921,6 +1910,515 @@ router.post('/paytr/payments/:paymentId/reconcile', async (req, res, next) => {
       client.release()
     }
 
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * Canonical bank_value_date parser and validator.
+ * Strictly accepts:
+ * 1. ISO datetime with explicit timezone, e.g. "2026-09-12T14:00:00+03:00", "2026-09-12T11:00:00Z"
+ * 2. Calendar day only "YYYY-MM-DD" -> canonicalized to Europe/Istanbul day start (+03:00): "YYYY-MM-DDT00:00:00+03:00"
+ * Strictly REJECTS timezone-less datetimes, e.g. "2026-09-12 14:00:00" or "2026-09-12T14:00:00"
+ * Returns canonical ISO / timezone string or null.
+ */
+export function parseCanonicalBankValueDate(val) {
+  if (!val || typeof val !== 'string') return null
+  const s = val.trim()
+  if (!s) return null
+
+  // 1. Calendar day only YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const canonical = `${s}T00:00:00+03:00`
+    const d = new Date(canonical)
+    if (isNaN(d.getTime())) return null
+    return canonical
+  }
+
+  // 2. Datetime with explicit timezone (Z or [+-]HH:MM or [+-]HHMM)
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+    const d = new Date(s)
+    if (isNaN(d.getTime())) return null
+    return s
+  }
+
+  return null
+}
+
+/**
+ * Canonical bank_reference comparison helper.
+ * Compares non-null values case-insensitively with trimming (UPPER(TRIM(...))).
+ * Treats null and undefined as equal null values.
+ */
+export function isSameBankRef(ref1, ref2) {
+  const c1 = ref1 != null && typeof ref1 === 'string' && ref1.trim() !== '' ? ref1.trim().toUpperCase() : null
+  const c2 = ref2 != null && typeof ref2 === 'string' && ref2.trim() !== '' ? ref2.trim().toUpperCase() : null
+  return c1 === c2
+}
+
+/**
+ * POST /api/integrations/paytr/settlements
+ * PayTR Settlement — Bank Transfer Foundation
+ * Transfers net settled proceeds from active PayTR card account to target bank account.
+ */
+router.post('/paytr/settlements', async (req, res, next) => {
+  try {
+    if (!await isSystemOpen()) {
+      return res.status(423).json({
+        error: 'Sistem PRE-OPENING modunda. Finansal mutasyon yapılamaz.',
+        code: 'SYSTEM_NOT_OPEN'
+      })
+    }
+
+    const { target_account_id, reconciliation_ids, bank_value_date, bank_reference } = req.body
+
+    // 1. Target account ID validation
+    const targetAccId = parseInt(target_account_id, 10)
+    if (!targetAccId || !Number.isSafeInteger(targetAccId) || targetAccId <= 0) {
+      return res.status(400).json({
+        error: 'target_account_id geçerli bir hesap kimliği olmalıdır',
+        code: 'INVALID_TARGET_ACCOUNT_ID'
+      })
+    }
+
+    // 2. Reconciliation IDs validation
+    if (!Array.isArray(reconciliation_ids) || reconciliation_ids.length === 0) {
+      return res.status(400).json({
+        error: 'reconciliation_ids boş olmayan bir dizi olmalıdır',
+        code: 'INVALID_RECONCILIATION_IDS'
+      })
+    }
+
+    const recIdSet = new Set()
+    const cleanRecIds = []
+    for (const id of reconciliation_ids) {
+      const num = parseInt(id, 10)
+      if (!Number.isSafeInteger(num) || num <= 0 || recIdSet.has(num)) {
+        return res.status(400).json({
+          error: 'reconciliation_ids geçerli ve benzersiz pozitif tamsayılardan oluşmalıdır',
+          code: 'INVALID_RECONCILIATION_IDS'
+        })
+      }
+      recIdSet.add(num)
+      cleanRecIds.push(num)
+    }
+    cleanRecIds.sort((a, b) => a - b)
+
+    // 3. bank_value_date strict validation (no timezone ambiguity)
+    const canonicalDate = parseCanonicalBankValueDate(bank_value_date)
+    if (!canonicalDate) {
+      return res.status(400).json({
+        error: 'bank_value_date timezone içeren ISO formatında (örn. 2026-09-12T14:00:00+03:00) veya YYYY-MM-DD takvim günü olmalıdır',
+        code: 'INVALID_BANK_VALUE_DATE'
+      })
+    }
+
+    // 4. bank_reference validation (non-empty after trim)
+    let trimmedBankRef = null
+    if (bank_reference !== undefined && bank_reference !== null) {
+      if (typeof bank_reference !== 'string') {
+        return res.status(400).json({
+          error: 'bank_reference metin olmalıdır',
+          code: 'INVALID_BANK_REFERENCE'
+        })
+      }
+      trimmedBankRef = bank_reference.trim()
+      if (trimmedBankRef === '') {
+        return res.status(400).json({
+          error: 'bank_reference boş string olamaz',
+          code: 'INVALID_BANK_REFERENCE'
+        })
+      }
+    }
+
+    // 5. Resolve active PayTR card account
+    const { rows: paytrAccRows } = await query(
+      `SELECT id, name, account_type, balance, is_active
+       FROM accounts
+       WHERE name = 'PayTR' AND account_type = 'card' AND is_active = true`
+    )
+    if (paytrAccRows.length === 0) {
+      return res.status(422).json({
+        error: 'Aktif PayTR hesabı bulunamadı',
+        code: 'PAYTR_ACCOUNT_INVALID'
+      })
+    }
+    const paytrAccount = paytrAccRows[0]
+
+    if (targetAccId === paytrAccount.id) {
+      return res.status(422).json({
+        error: 'Hedef hesap PayTR hesabı olamaz',
+        code: 'INVALID_TARGET_ACCOUNT'
+      })
+    }
+
+    // 6. Resolve target bank account
+    const { rows: targetAccRows } = await query(
+      `SELECT id, name, account_type, balance, is_active
+       FROM accounts
+       WHERE id = $1`,
+      [targetAccId]
+    )
+    if (targetAccRows.length === 0) {
+      return res.status(404).json({
+        error: 'Hedef hesap bulunamadı',
+        code: 'TARGET_ACCOUNT_NOT_FOUND'
+      })
+    }
+    const targetAccount = targetAccRows[0]
+    if (!targetAccount.is_active) {
+      return res.status(422).json({
+        error: 'Hedef hesap aktif değil',
+        code: 'TARGET_ACCOUNT_INACTIVE'
+      })
+    }
+    if (targetAccount.account_type !== 'bank') {
+      return res.status(422).json({
+        error: 'Hedef hesap bir banka hesabı olmalıdır',
+        code: 'TARGET_ACCOUNT_NOT_BANK'
+      })
+    }
+
+    // 7. Transaction
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      // Check existing settlement junction for these reconciliation IDs
+      const { rows: existingJunctionRows } = await client.query(
+        `SELECT psr.reconciliation_id, psr.settlement_id,
+                s.id AS s_id, s.settlement_ref, s.target_account_id,
+                s.gross_amount, s.commission_amount, s.net_amount,
+                s.bank_value_date, s.bank_reference, s.transfer_ref,
+                s.created_at AS settled_at
+         FROM paytr_settlement_reconciliations psr
+         JOIN paytr_settlements s ON s.id = psr.settlement_id
+         WHERE psr.reconciliation_id = ANY($1::int[])`,
+        [cleanRecIds]
+      )
+
+      if (existingJunctionRows.length > 0) {
+        const first = existingJunctionRows[0]
+        const allSameSettlement = existingJunctionRows.every(r => r.settlement_id === first.settlement_id)
+
+        // Read all reconciliations belonging to this existing settlement
+        const { rows: allForSettlement } = await client.query(
+          `SELECT reconciliation_id
+           FROM paytr_settlement_reconciliations
+           WHERE settlement_id = $1
+           ORDER BY reconciliation_id ASC`,
+          [first.settlement_id]
+        )
+        const existingRecIds = allForSettlement.map(r => r.reconciliation_id)
+        const isExactSameRecSet =
+          allSameSettlement &&
+          existingRecIds.length === cleanRecIds.length &&
+          existingRecIds.every((v, i) => v === cleanRecIds[i])
+
+        if (!isExactSameRecSet) {
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'Seçilen mutabakatlardan biri veya daha fazlası zaten başka bir transferde kullanılmış',
+            code: 'RECONCILIATION_ALREADY_SETTLED'
+          })
+        }
+
+        // Calculate expected gross, commission, net from paytr_reconciliations
+        const { rows: recDataRows } = await client.query(
+          `SELECT id, payment_amount, commission_amount, net_amount
+           FROM paytr_reconciliations
+           WHERE id = ANY($1::int[])`,
+          [cleanRecIds]
+        )
+        let calcGross = 0, calcComm = 0, calcNet = 0
+        for (const r of recDataRows) {
+          calcGross += parseDecimalToCents(r.payment_amount)
+          calcComm += parseDecimalToCents(r.commission_amount)
+          calcNet += parseDecimalToCents(r.net_amount)
+        }
+
+        const isTargetMatch = first.target_account_id === targetAccId
+        const isDateMatch = new Date(first.bank_value_date).getTime() === new Date(canonicalDate).getTime()
+        const isRefMatch = isSameBankRef(first.bank_reference, trimmedBankRef)
+        const isGrossMatch = parseDecimalToCents(first.gross_amount) === calcGross
+        const isCommMatch = parseDecimalToCents(first.commission_amount) === calcComm
+        const isNetMatch = parseDecimalToCents(first.net_amount) === calcNet
+
+        if (isTargetMatch && isDateMatch && isRefMatch && isGrossMatch && isCommMatch && isNetMatch) {
+          await client.query('COMMIT')
+          return res.status(200).json({
+            ok: true,
+            already_settled: true,
+            settlement: {
+              id: first.s_id,
+              settlement_ref: first.settlement_ref,
+              target_account_id: first.target_account_id,
+              gross_amount: first.gross_amount,
+              commission_amount: first.commission_amount,
+              net_amount: first.net_amount,
+              transfer_ref: first.transfer_ref,
+              bank_value_date: first.bank_value_date,
+              bank_reference: first.bank_reference,
+              reconciliation_ids: existingRecIds,
+              settled_at: first.settled_at
+            },
+            message: 'Mutabakat seti daha önce aynı parametrelerle başarıyla aktarılmış'
+          })
+        } else {
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'Aynı mutabakat seti daha önce farklı transfer parametreleri ile aktarılmış',
+            code: 'PAYTR_SETTLEMENT_CONFLICT'
+          })
+        }
+      }
+
+      // Reconciliations have not been settled yet. Lock them FOR UPDATE:
+      const { rows: lockRecRows } = await client.query(
+        `SELECT id, payment_amount, commission_amount, net_amount
+         FROM paytr_reconciliations
+         WHERE id = ANY($1::int[])
+         ORDER BY id ASC
+         FOR UPDATE`,
+        [cleanRecIds]
+      )
+
+      if (lockRecRows.length !== cleanRecIds.length) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({
+          error: 'Bazı mutabakat kayıtları bulunamadı',
+          code: 'RECONCILIATION_NOT_FOUND'
+        })
+      }
+
+      let totalGrossCents = 0
+      let totalCommCents = 0
+      let totalNetCents = 0
+      for (const r of lockRecRows) {
+        const g = parseDecimalToCents(r.payment_amount)
+        const c = parseDecimalToCents(r.commission_amount)
+        const n = parseDecimalToCents(r.net_amount)
+        if (g == null || c == null || n == null || g !== c + n) {
+          await client.query('ROLLBACK')
+          return res.status(422).json({
+            error: 'Mutabakat tutarları tutarsız',
+            code: 'INVALID_RECONCILIATION_AMOUNTS'
+          })
+        }
+        totalGrossCents += g
+        totalCommCents += c
+        totalNetCents += n
+      }
+
+      if (totalGrossCents !== totalCommCents + totalNetCents) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({
+          error: 'Toplam brüt tutar, komisyon ve net tutar toplamına eşit değil',
+          code: 'AMOUNT_SUM_MISMATCH'
+        })
+      }
+
+      if (totalNetCents <= 0) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({
+          error: 'Aktarılacak net tutar 0 veya negatif olamaz',
+          code: 'NET_AMOUNT_NON_POSITIVE'
+        })
+      }
+
+      // Concurrency-safe backend-generated references
+      const settlementRef = 'PST-' + crypto.randomUUID()
+      const transferRef = crypto.randomUUID()
+      const grossStr = centsToDecimalString(totalGrossCents)
+      const commStr = centsToDecimalString(totalCommCents)
+      const netStr = centsToDecimalString(totalNetCents)
+
+      // Insert paytr_settlements
+      const { rows: settlementInsertRows } = await client.query(
+        `INSERT INTO paytr_settlements (
+           settlement_ref, target_account_id, gross_amount, commission_amount,
+           net_amount, transfer_ref, bank_value_date, bank_reference
+         ) VALUES (
+           $1, $2, $3::numeric, $4::numeric,
+           $5::numeric, $6, $7::timestamptz, $8
+         ) RETURNING id, created_at AS settled_at`,
+        [
+          settlementRef,
+          targetAccId,
+          grossStr,
+          commStr,
+          netStr,
+          transferRef,
+          canonicalDate,
+          trimmedBankRef || null
+        ]
+      )
+      const newSettlement = settlementInsertRows[0]
+
+      // Insert paytr_settlement_reconciliations
+      for (const recId of cleanRecIds) {
+        await client.query(
+          `INSERT INTO paytr_settlement_reconciliations (settlement_id, reconciliation_id)
+           VALUES ($1, $2)`,
+          [newSettlement.id, recId]
+        )
+      }
+
+      // Execute transfer between PayTR account and target bank account
+      await executeAccountTransfer(client, {
+        from_account_id: paytrAccount.id,
+        to_account_id: targetAccId,
+        amount: netStr,
+        description: `PayTR Net Hakediş Virmanı (${settlementRef})`,
+        transaction_date: canonicalDate,
+        reference_type: 'paytr_settlement',
+        reference_id: newSettlement.id,
+        transfer_ref: transferRef
+      })
+
+      await client.query('COMMIT')
+
+      return res.status(201).json({
+        ok: true,
+        already_settled: false,
+        settlement: {
+          id: newSettlement.id,
+          settlement_ref: settlementRef,
+          target_account_id: targetAccId,
+          gross_amount: grossStr,
+          commission_amount: commStr,
+          net_amount: netStr,
+          transfer_ref: transferRef,
+          bank_value_date: canonicalDate,
+          bank_reference: trimmedBankRef || null,
+          reconciliation_ids: cleanRecIds,
+          settled_at: newSettlement.settled_at
+        },
+        message: 'PayTR hakediş aktarımı başarıyla kaydedildi'
+      })
+
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+
+      // PayTR balance insufficient (thrown by executeAccountTransfer)
+      if (err.code === 'INSUFFICIENT_BALANCE') {
+        return res.status(422).json({
+          error: 'PayTR hesabında aktarılacak yeterli bakiye bulunmuyor',
+          code: 'PAYTR_INSUFFICIENT_BALANCE'
+        })
+      }
+
+      // PostgreSQL unique constraint races (Correction #5)
+      if (err.code === '23505') {
+        if (err.constraint?.includes('bank_ref') || err.message?.includes('bank_ref')) {
+          return res.status(409).json({
+            error: 'Bu banka dekont / referans numarası ile daha önce transfer kaydedilmiş',
+            code: 'BANK_REFERENCE_EXISTS'
+          })
+        }
+        if (err.constraint?.includes('reconciliation') || err.message?.includes('reconciliation')) {
+          try {
+            const checkRes = await pool.query(
+              `SELECT s.*, psr.reconciliation_id
+               FROM paytr_settlement_reconciliations psr
+               JOIN paytr_settlements s ON s.id = psr.settlement_id
+               WHERE psr.reconciliation_id = ANY($1::int[])`,
+              [cleanRecIds]
+            )
+            if (checkRes.rows.length > 0) {
+              const first = checkRes.rows[0]
+              const allSame = checkRes.rows.every(r => r.id === first.id)
+              const { rows: allForS } = await pool.query(
+                `SELECT reconciliation_id
+                 FROM paytr_settlement_reconciliations
+                 WHERE settlement_id = $1
+                 ORDER BY reconciliation_id ASC`,
+                [first.id]
+              )
+              const existingIds = allForS.map(r => r.reconciliation_id)
+              const isExactSameSet =
+                existingIds.length === cleanRecIds.length &&
+                existingIds.every((v, i) => v === cleanRecIds[i])
+
+              if (allSame && isExactSameSet) {
+                const targetMatch = first.target_account_id === targetAccId
+                const dateMatch = new Date(first.bank_value_date).getTime() === new Date(canonicalDate).getTime()
+                const refMatch = isSameBankRef(first.bank_reference, trimmedBankRef)
+                if (targetMatch && dateMatch && refMatch) {
+                  return res.status(200).json({
+                    ok: true,
+                    already_settled: true,
+                    settlement: {
+                      id: first.id,
+                      settlement_ref: first.settlement_ref,
+                      target_account_id: first.target_account_id,
+                      gross_amount: first.gross_amount,
+                      commission_amount: first.commission_amount,
+                      net_amount: first.net_amount,
+                      transfer_ref: first.transfer_ref,
+                      bank_value_date: first.bank_value_date,
+                      bank_reference: first.bank_reference,
+                      reconciliation_ids: existingIds,
+                      settled_at: first.settled_at
+                    },
+                    message: 'Mutabakat seti daha önce aynı parametrelerle başarıyla aktarılmış'
+                  })
+                } else {
+                  return res.status(409).json({
+                    error: 'Aynı mutabakat seti daha önce farklı transfer parametreleri ile aktarılmış',
+                    code: 'PAYTR_SETTLEMENT_CONFLICT'
+                  })
+                }
+              }
+            }
+          } catch {
+            // Fall through
+          }
+          return res.status(409).json({
+            error: 'Seçilen mutabakatlardan biri veya daha fazlası zaten başka bir transferde kullanılmış',
+            code: 'RECONCILIATION_ALREADY_SETTLED'
+          })
+        }
+      }
+
+      if (err.status && err.status < 500) {
+        return res.status(err.status).json({ error: err.message, code: err.code })
+      }
+      next(err)
+    } finally {
+      client.release()
+    }
+
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/settlements
+ * List PayTR settlements with linked reconciliations.
+ */
+router.get('/paytr/settlements', async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
+    const { rows } = await query(
+      `SELECT s.id, s.settlement_ref, s.target_account_id, a.name AS target_account_name,
+              s.gross_amount, s.commission_amount, s.net_amount, s.transfer_ref,
+              s.bank_value_date, s.bank_reference, s.created_at AS settled_at, s.created_at,
+              COALESCE(
+                JSON_AGG(psr.reconciliation_id ORDER BY psr.reconciliation_id ASC)
+                FILTER (WHERE psr.reconciliation_id IS NOT NULL), '[]'
+              ) AS reconciliation_ids
+       FROM paytr_settlements s
+       LEFT JOIN accounts a ON a.id = s.target_account_id
+       LEFT JOIN paytr_settlement_reconciliations psr ON psr.settlement_id = s.id
+       GROUP BY s.id, a.name
+       ORDER BY s.created_at DESC, s.id DESC
+       LIMIT $1`,
+      [limit]
+    )
+    res.json(rows)
   } catch (err) {
     next(err)
   }

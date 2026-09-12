@@ -1,6 +1,8 @@
+import crypto from 'crypto'
 import { Router } from 'express'
 import { query, pool } from '../db.js'
 import { isSystemOpen, assertAccountReady, assertSupplierReady, assertOrderPayable } from '../opening-guard.js'
+import { parseDecimalToCents } from '../services/paytr.js'
 
 const router = Router()
 
@@ -164,6 +166,107 @@ export async function recordAccountExpense(client, {
   return { transaction_id: rows[0].id }
 }
 
+/**
+ * Shared domain helper for executing an inter-account transfer.
+ * Locks both accounts deterministically in ascending ID order (ORDER BY id ASC FOR UPDATE)
+ * to prevent deadlocks when concurrent A->B and B->A transfers run.
+ * Caller owns transaction lifecycle (helper does not open or commit transactions).
+ * Uses exact integer cents for balance check and SQL NUMERIC exact arithmetic for balance updates.
+ * Guarantees exactly one transfer pair (transfer_out and transfer_in) linked by transfer_ref.
+ */
+export async function executeAccountTransfer(client, {
+  from_account_id,
+  to_account_id,
+  amount,
+  description,
+  transaction_date,
+  reference_type,
+  reference_id,
+  transfer_ref
+}) {
+  if (!from_account_id || !to_account_id) {
+    throw Object.assign(new Error('Kaynak ve hedef hesap zorunludur'), { status: 400 })
+  }
+  if (String(from_account_id) === String(to_account_id)) {
+    throw Object.assign(new Error('Kaynak ve hedef hesap aynı olamaz'), { status: 400 })
+  }
+  const fromId = parseInt(from_account_id, 10)
+  const toId = parseInt(to_account_id, 10)
+  if (isNaN(fromId) || isNaN(toId)) {
+    throw Object.assign(new Error('Geçersiz hesap kimliği'), { status: 400 })
+  }
+
+  const amtStr = String(amount).trim()
+  if (!amtStr || !/^\d+(\.\d{1,2})?$/.test(amtStr) || parseFloat(amtStr) <= 0) {
+    throw Object.assign(new Error('Tutar 0\'dan büyük olmalıdır'), { status: 400 })
+  }
+
+  await assertAccountReady(fromId)
+  await assertAccountReady(toId)
+
+  // Lock both accounts deterministically in ascending ID order to prevent deadlocks (A->B vs B->A)
+  const { rows: lockedAccounts } = await client.query(
+    `SELECT id, name, account_type, balance, is_active
+     FROM accounts
+     WHERE id = ANY($1::int[])
+     ORDER BY id ASC
+     FOR UPDATE`,
+    [[fromId, toId]]
+  )
+
+  const fromAcc = lockedAccounts.find(a => a.id === fromId)
+  const toAcc = lockedAccounts.find(a => a.id === toId)
+
+  if (!fromAcc) throw Object.assign(new Error('Kaynak hesap bulunamadı'), { status: 404 })
+  if (!toAcc) throw Object.assign(new Error('Hedef hesap bulunamadı'), { status: 404 })
+  if (!fromAcc.is_active) throw Object.assign(new Error('Kaynak hesap aktif değil'), { status: 400 })
+  if (!toAcc.is_active) throw Object.assign(new Error('Hedef hesap aktif değil'), { status: 400 })
+
+  const fromBalCents = parseDecimalToCents(fromAcc.balance)
+  const transferCents = parseDecimalToCents(amtStr)
+  if (fromBalCents == null || transferCents == null || fromBalCents < transferCents) {
+    throw Object.assign(
+      new Error(`Yetersiz bakiye (mevcut: ₺${parseFloat(fromAcc.balance).toFixed(2)})`),
+      { status: 400, code: 'INSUFFICIENT_BALANCE' }
+    )
+  }
+
+  const ref = transfer_ref || crypto.randomUUID()
+
+  // Insert transfer_out and transfer_in transactions with identical transfer_ref and canonical transaction_date
+  const { rows: outRows } = await client.query(
+    `INSERT INTO transactions (
+       account_id, amount, transaction_type, description,
+       transaction_date, transfer_ref, reference_type, reference_id
+     ) VALUES (
+       $1, (-1 * $2::numeric), 'transfer_out', $3,
+       COALESCE($4::timestamptz, NOW()), $5, $6, $7
+     ) RETURNING id`,
+    [fromId, amtStr, description || null, transaction_date || null, ref, reference_type || null, reference_id || null]
+  )
+
+  const { rows: inRows } = await client.query(
+    `INSERT INTO transactions (
+       account_id, amount, transaction_type, description,
+       transaction_date, transfer_ref, reference_type, reference_id
+     ) VALUES (
+       $1, $2::numeric, 'transfer_in', $3,
+       COALESCE($4::timestamptz, NOW()), $5, $6, $7
+     ) RETURNING id`,
+    [toId, amtStr, description || null, transaction_date || null, ref, reference_type || null, reference_id || null]
+  )
+
+  // Update account balances via SQL NUMERIC exact arithmetic
+  await client.query(`UPDATE accounts SET balance = balance - $1::numeric WHERE id = $2`, [amtStr, fromId])
+  await client.query(`UPDATE accounts SET balance = balance + $1::numeric WHERE id = $2`, [amtStr, toId])
+
+  return {
+    transfer_ref: ref,
+    transfer_out_id: outRows[0].id,
+    transfer_in_id: inRows[0].id
+  }
+}
+
 // Açık alacaklı müşteriler + siparişleri
 router.get('/receivables', async (_req, res, next) => {
 
@@ -310,46 +413,28 @@ router.post('/transactions', async (req, res, next) => {
 
 // Hesaplar arası transfer — CHK-F06 (validation + ortak transfer_ref)
 router.post('/transfer', async (req, res, next) => {
-  const client = await (await import('../db.js')).pool.connect()
+  const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const { from_account_id, to_account_id, amount, description } = req.body
-    const amt = parseFloat(amount)
-    // CHK-F06 validasyonlar
-    if (String(from_account_id) === String(to_account_id)) {
-      await client.query('ROLLBACK')
-      return res.status(400).json({ error: 'Kaynak ve hedef hesap aynı olamaz' })
-    }
-    await assertAccountReady(from_account_id)
-    await assertAccountReady(to_account_id)
-    if (!amt || amt <= 0) {
-      await client.query('ROLLBACK')
-      return res.status(400).json({ error: 'Tutar 0\'dan büyük olmalıdır' })
-    }
-    // Bakiye yeterlilik
-    const { rows: fromAcc } = await client.query('SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [from_account_id])
-    if (!fromAcc[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Kaynak hesap bulunamadı' }) }
-    if (parseFloat(fromAcc[0].balance) < amt - 0.005) {
-      await client.query('ROLLBACK')
-      return res.status(400).json({ error: `Yetersiz bakiye (mevcut: ₺${parseFloat(fromAcc[0].balance).toFixed(2)})` })
-    }
-    // Ortak UUID referansı
-    const { rows: uuidRow } = await client.query('SELECT gen_random_uuid() AS uid')
-    const ref = uuidRow[0].uid
-    await client.query(
-      `INSERT INTO transactions (account_id,amount,transaction_type,description,transfer_ref) VALUES ($1,$2,'transfer_out',$3,$4)`,
-      [from_account_id, -amt, description, ref]
-    )
-    await client.query(
-      `INSERT INTO transactions (account_id,amount,transaction_type,description,transfer_ref) VALUES ($1,$2,'transfer_in',$3,$4)`,
-      [to_account_id, amt, description, ref]
-    )
-    await client.query('UPDATE accounts SET balance=balance-$1 WHERE id=$2', [amt, from_account_id])
-    await client.query('UPDATE accounts SET balance=balance+$1 WHERE id=$2', [amt, to_account_id])
+    const { from_account_id, to_account_id, amount, description, transaction_date } = req.body
+    const result = await executeAccountTransfer(client, {
+      from_account_id,
+      to_account_id,
+      amount,
+      description,
+      transaction_date: transaction_date || null
+    })
     await client.query('COMMIT')
-    res.status(201).json({ ok: true, transfer_ref: ref })
-  } catch (e) { await client.query('ROLLBACK'); next(e) }
-  finally { client.release() }
+    res.status(201).json({ ok: true, transfer_ref: result.transfer_ref })
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (e.status && e.status < 500) {
+      return res.status(e.status).json({ error: e.message })
+    }
+    next(e)
+  } finally {
+    client.release()
+  }
 })
 
 // Gider kategori listesi (UI için)
