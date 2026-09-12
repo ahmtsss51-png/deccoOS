@@ -136,12 +136,18 @@ export function renderSidebar(active) {
     ['opening',    '🚀', 'Açılış',       '/opening.html'],
     ['import',     '📂', 'Veri Aktarım', '/import.html'],
     ['reports',    '📈', 'Raporlar',     '/reports.html'],
+    ['section',    null, 'Entegrasyonlar', null],
+    ['woocommerce','🔌', 'WooCommerce',  '/integrations-woocommerce.html'],
+    ['section',    null, 'Sistem',         null],
     ['settings',   '⚙️', 'Ayarlar',      '/settings.html'],
   ]
   const theme = localStorage.getItem('decco_theme') || 'dark'
-  document.querySelector('.sidebar .nav').innerHTML = links.map(([key, icon, label, href]) =>
-    `<a href="${href}" class="${active === key ? 'active' : ''}"><span class="nav-icon">${icon}</span> ${label}</a>`
-  ).join('')
+  document.querySelector('.sidebar .nav').innerHTML = links.map(([key, icon, label, href]) => {
+    if (key === 'section') {
+      return `<div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-secondary);padding:10px 18px 4px;opacity:.7">${label}</div>`
+    }
+    return `<a href="${href}" class="${active === key ? 'active' : ''}"><span class="nav-icon">${icon}</span> ${label}</a>`
+  }).join('')
   // Sidebar footer: kullanıcı bilgisi + tema toggle + çıkış
   const footer = document.querySelector('.sidebar-footer')
   if (footer) {

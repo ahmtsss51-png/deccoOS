@@ -259,4 +259,54 @@ router.get('/woocommerce/events/:eventId/resolve', async (req, res, next) => {
   }
 })
 
+/**
+ * GET /api/integrations/woocommerce/events
+ *
+ * WooCommerce webhook olaylarını listeler (salt okunur):
+ * - Yalnızca provider = 'woocommerce'
+ * - En yeni event üstte, maksimum 50 kayıt
+ * - Eksik veya beklenmeyen payload alanlarında null döner, asla hata fırlatmaz.
+ */
+router.get('/woocommerce/events', async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, provider, event_key, event_type, payload, status, received_at
+       FROM integration_events
+       WHERE provider = 'woocommerce'
+       ORDER BY received_at DESC, id DESC
+       LIMIT 50`
+    )
+
+    const events = rows.map(r => {
+      const p = (r.payload && typeof r.payload === 'object') ? r.payload : {}
+      const billing = (p.billing && typeof p.billing === 'object') ? p.billing : {}
+      const firstName = typeof billing.first_name === 'string' ? billing.first_name.trim() : ''
+      const lastName = typeof billing.last_name === 'string' ? billing.last_name.trim() : ''
+      const customerName = (firstName || lastName) ? `${firstName} ${lastName}`.trim() : null
+      const lineItems = Array.isArray(p.line_items) ? p.line_items : null
+
+      return {
+        event_id: Number(r.id),
+        event_type: r.event_type || null,
+        integration_status: r.status || null,
+        received_at: r.received_at || null,
+        woo_order_id: p.id != null ? p.id : null,
+        woo_order_number: p.number != null ? String(p.number) : (p.id != null ? String(p.id) : null),
+        woo_status: typeof p.status === 'string' ? p.status : null,
+        customer_name: customerName,
+        billing_email: typeof billing.email === 'string' && billing.email.trim() ? billing.email.trim() : null,
+        billing_phone: typeof billing.phone === 'string' && billing.phone.trim() ? billing.phone.trim() : null,
+        total: p.total != null ? String(p.total) : null,
+        currency: typeof p.currency === 'string' ? p.currency : null,
+        payment_method_title: typeof p.payment_method_title === 'string' ? p.payment_method_title : null,
+        line_count: lineItems ? lineItems.length : null
+      }
+    })
+
+    res.json(events)
+  } catch (e) {
+    next(e)
+  }
+})
+
 export default router
