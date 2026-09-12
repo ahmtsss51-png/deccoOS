@@ -761,7 +761,7 @@ export async function queryPaytrTransactionReport(startDate, endDate, options = 
       }
     }
 
-    const rawList = Array.isArray(data.data) ? data.data : (Array.isArray(data.transactions) ? data.transactions : [])
+    const rawList = Array.isArray(data.list) ? data.list : (Array.isArray(data.data) ? data.data : (Array.isArray(data.transactions) ? data.transactions : []))
     const parsedTransactions = []
 
     for (let i = 0; i < rawList.length; i++) {
@@ -846,15 +846,16 @@ export async function queryPaytrTransactionReport(startDate, endDate, options = 
 
       // Commission rate
       let commRate = null
-      if (it.komisyon_orani != null && String(it.komisyon_orani).trim() !== '') {
-        const parsedRate = parseFloat(String(it.komisyon_orani).replace(',', '.'))
+      const rawCommissionRate = it.komisyon_orani ?? it.kesinti_orani
+      if (rawCommissionRate != null && String(rawCommissionRate).trim() !== '') {
+        const parsedRate = parseFloat(String(rawCommissionRate).replace(',', '.'))
         if (!isNaN(parsedRate) && parsedRate >= 0) {
           commRate = (parsedRate / 100).toFixed(4)
         }
       }
 
       const cardBrand = it.kart_marka != null ? String(it.kart_marka).trim() : null
-      const maskedCard = it.maskeli_kart != null ? String(it.maskeli_kart).trim() : (it.masked_card != null ? String(it.masked_card).trim() : null)
+      const maskedCard = it.maskeli_kart != null ? String(it.maskeli_kart).trim() : (it.masked_card != null ? String(it.masked_card).trim() : (it.kart_no != null ? String(it.kart_no).trim() : null))
       const paymentType = it.odeme_tipi != null ? String(it.odeme_tipi).trim() : (it.payment_type != null ? String(it.payment_type).trim() : null)
 
       parsedTransactions.push({
