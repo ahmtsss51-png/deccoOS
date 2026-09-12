@@ -27,6 +27,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-decco}:${POSTGRES_PASSWORD:-decco123}@db:5432/${POSTGRES_DB:-decco}
       JWT_SECRET: ${JWT_SECRET:-changeme-in-production}
+      WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
     volumes:
