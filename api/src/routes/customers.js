@@ -80,7 +80,7 @@ router.get('/:id', async (req, res, next) => {
 // FIX-F3: Canonical TR telefon — 0532.../+90532.../0090532... → 5321234567
 // Önce tüm non-digit'ler temizlenir; ardından ülke kodu (90) ve baştaki 0 şeritlenir.
 // Bu mantık DB sorgusunda da yansıtılır: regexp_replace + LTRIM dönüşümü ile.
-function normalizePhone(raw) {
+export function normalizePhone(raw) {
   if (!raw) return null
   let digits = String(raw).replace(/\D/g, '')
   if (digits.startsWith('0090')) digits = digits.slice(4)
@@ -92,7 +92,7 @@ function normalizePhone(raw) {
 
 // DB-side normalization: non-digit sil, ardından öne gelen 90 veya 0 şerit
 // Sonuç JS normalizePhone() ile canonical eşdeğer olur.
-const PHONE_CANON_SQL = `
+export const PHONE_CANON_SQL = `
   regexp_replace(
     regexp_replace(
       regexp_replace(phone, '[^0-9]', '', 'g'),
