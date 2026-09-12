@@ -141,6 +141,7 @@ export function renderSidebar(active) {
     ['section',    null, 'Entegrasyonlar', null],
     ['woocommerce','🔌', 'WooCommerce',  '/integrations-woocommerce.html'],
     ['paytr',      '💳', 'PayTR',        '/integrations-paytr.html'],
+    ['whatsapp',   '💬', 'WhatsApp',     '/integrations-whatsapp.html'],
     ['section',    null, 'Sistem',         null],
     ['settings',   '⚙️', 'Ayarlar',      '/settings.html'],
   ]

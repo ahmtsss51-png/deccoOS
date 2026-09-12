@@ -1,6 +1,12 @@
 import { Router, urlencoded } from 'express'
 import crypto from 'crypto'
 import { query, pool } from '../db.js'
+import {
+  verifyWebhookChallenge,
+  verifyWebhookSignature,
+  extractAndNormalizeWhatsAppPayload
+} from '../services/whatsapp.js'
+
 
 const router = Router()
 
@@ -239,4 +245,103 @@ router.post('/paytr/link', urlencoded({ extended: false }), async (req, res, nex
   }
 })
 
+/**
+ * GET /api/webhooks/whatsapp
+ * Meta WhatsApp Cloud API Webhook Verification Endpoint
+ * Returns hub.challenge if hub.verify_token matches WHATSAPP_VERIFY_TOKEN.
+ */
+router.get('/whatsapp', (req, res) => {
+  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN
+  const result = verifyWebhookChallenge(req.query, verifyToken)
+
+  if (!result.valid) {
+    return res.status(403).type('text/plain').send('Forbidden')
+  }
+
+  return res.status(200).type('text/plain').send(result.challenge)
+})
+
+/**
+ * POST /api/webhooks/whatsapp
+ * Meta WhatsApp Cloud API Webhook Event Receiver
+ * - Default fail-closed signature validation with WHATSAPP_APP_SECRET
+ * - Extracts and normalizes incoming messages
+ * - Stores immutable raw event in integration_events
+ * - Stores normalized messages in whatsapp_messages with message_id idempotency
+ * - All DB operations executed within a single PostgreSQL transaction
+ */
+router.post('/whatsapp', async (req, res, next) => {
+  try {
+    const appSecret = process.env.WHATSAPP_APP_SECRET
+    const sigHeader = req.headers['x-hub-signature-256']
+
+    const sigResult = verifyWebhookSignature(req.rawBody, sigHeader, appSecret)
+    if (!sigResult.valid) {
+      const statusCode = sigResult.error === 'WHATSAPP_APP_SECRET_MISSING' ? 500 : 401
+      return res.status(statusCode).json({ error: sigResult.error })
+    }
+
+    const bodySha256 = crypto.createHash('sha256').update(req.rawBody || Buffer.from('')).digest('hex')
+    const { event_type, messages, statusesCount } = extractAndNormalizeWhatsAppPayload(req.body)
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      const eventKey = 'sha256:' + bodySha256
+      const { rows: eventRows } = await client.query(`
+        INSERT INTO integration_events (provider, event_key, event_type, payload, body_sha256, status)
+        VALUES ('whatsapp', $1, $2, $3, $4, 'received')
+        ON CONFLICT (provider, event_key) DO UPDATE
+          SET received_at = integration_events.received_at
+        RETURNING id
+      `, [eventKey, event_type, JSON.stringify(req.body || {}), bodySha256])
+
+      const eventId = eventRows[0]?.id || null
+
+      let insertedCount = 0
+      for (const msg of messages) {
+        const { rowCount } = await client.query(`
+          INSERT INTO whatsapp_messages (
+            integration_event_id, message_id, wa_id, phone, sender_name,
+            message_timestamp, message_type, text, direction, raw_message
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          ON CONFLICT (message_id) DO NOTHING
+        `, [
+          eventId,
+          msg.message_id,
+          msg.wa_id,
+          msg.phone,
+          msg.sender_name,
+          msg.message_timestamp,
+          msg.message_type,
+          msg.text,
+          msg.direction,
+          JSON.stringify(msg.raw_message || {})
+        ])
+        if (rowCount > 0) insertedCount++
+      }
+
+      await client.query('COMMIT')
+      return res.status(200).json({
+        ok: true,
+        event_id: eventId,
+        event_type,
+        messages_received: messages.length,
+        messages_inserted: insertedCount,
+        statuses_count: statusesCount
+      })
+    } catch (dbErr) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw dbErr
+    } finally {
+      client.release()
+    }
+  } catch (err) {
+    next(err)
+  }
+})
+
 export default router
+

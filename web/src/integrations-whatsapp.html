@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>WhatsApp Entegrasyonu — Decco OS</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <style>
+    .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+    @media (max-width: 900px) {
+      .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 500px) {
+      .kpi-row { grid-template-columns: 1fr; }
+    }
+    .status-banner {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .status-badge-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .cfg-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: .75rem;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .cfg-ok { color: var(--green); border-color: rgba(34,197,94,.3); background: rgba(34,197,94,.08); }
+    .cfg-warn { color: var(--yellow); border-color: rgba(234,179,8,.3); background: rgba(234,179,8,.08); }
+    .cfg-missing { color: var(--text-secondary); border-color: var(--border); }
+    .modal-xl { max-width: 780px; width: 100%; }
+    .msg-preview-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .raw-box {
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: .78rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .td-action { text-align: right; white-space: nowrap; }
+    .phone-pill {
+      font-family: monospace;
+      font-size: .8rem;
+      background: var(--surface-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo">Decco<span class="logo-dot">●</span>OS<span>Üretim Yönetim Sistemi</span></div>
+  <div class="nav"></div>
+  <div class="sidebar-footer">Decco Deri © 2026</div>
+</nav>
+
+<main class="main">
+  <div class="page-header">
+    <div>
+      <h1>WhatsApp Entegrasyonu</h1>
+      <p style="color:var(--text-secondary);font-size:.83rem;margin-top:4px">
+        Meta WhatsApp Cloud API yerel mesaj defteri, telefon öneri/eşleme ve sipariş bağlama (Temel Faz)
+      </p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-secondary btn-sm" id="btn-refresh">🔄 Yenile</button>
+    </div>
+  </div>
+
+  <!-- Bağlantı Durumu Kartı -->
+  <div class="status-banner" id="status-banner">
+    <div>
+      <div style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-secondary);margin-bottom:4px">
+        Bağlantı & Kurulum Durumu
+      </div>
+      <div style="font-weight:600;font-size:.92rem" id="status-message">Yükleniyor...</div>
+    </div>
+    <div class="status-badge-group" id="cfg-badges">
+      <span class="cfg-badge cfg-missing" id="badge-token">Verify Token: ...</span>
+      <span class="cfg-badge cfg-missing" id="badge-secret">App Secret: ...</span>
+      <span class="cfg-badge cfg-missing" id="badge-phone">Phone Number ID: ...</span>
+      <span class="cfg-badge cfg-missing" id="badge-webhook">Webhook: /api/webhooks/whatsapp</span>
+    </div>
+  </div>
+
+  <!-- KPI Sayaç Kartları -->
+  <div class="kpi-row">
+    <div class="card kpi-card">
+      <div class="kpi-title">Toplam Mesaj</div>
+      <div class="kpi-value" id="kpi-total">0</div>
+      <div class="kpi-sub">Gelen WhatsApp mesajı</div>
+      <div class="kpi-icon" style="background:rgba(59,130,246,.1);color:var(--blue)">💬</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Eşleşen Müşteri</div>
+      <div class="kpi-value" id="kpi-matched">0</div>
+      <div class="kpi-sub">Decco OS kartına bağlı</div>
+      <div class="kpi-icon" style="background:rgba(34,197,94,.1);color:var(--green)">👤</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Öneri Bekleyen</div>
+      <div class="kpi-value" id="kpi-suggested">0</div>
+      <div class="kpi-sub">Telefon eşleşen aday</div>
+      <div class="kpi-icon" style="background:rgba(234,179,8,.1);color:var(--yellow)">💡</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-title">Eşleşmeyen</div>
+      <div class="kpi-value" id="kpi-unmatched">0</div>
+      <div class="kpi-sub">Kayıtsız numara</div>
+      <div class="kpi-icon" style="background:rgba(107,114,128,.1);color:var(--text-secondary)">❓</div>
+    </div>
+  </div>
+
+  <!-- Filtre Sekmeleri -->
+  <div class="filter-tabs" id="status-tabs" style="margin-bottom:12px">
+    <button class="filter-tab active" data-status="all">Tüm Mesajlar</button>
+    <button class="filter-tab" data-status="unmatched">Eşleşmeyenler</button>
+    <button class="filter-tab" data-status="suggested">Öneri Bekleyenler</button>
+    <button class="filter-tab" data-status="matched">Eşleşenler</button>
+  </div>
+
+  <!-- Arama Çubuğu -->
+  <div class="search-bar" style="margin-bottom:16px">
+    <span>🔍</span>
+    <input id="search-input" type="text" placeholder="Gönderici adı, telefon, mesaj ID veya metin ara..." />
+  </div>
+
+  <!-- Gelen Mesajlar Tablosu -->
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Tarih</th>
+            <th>Gönderici / Telefon</th>
+            <th>Tür</th>
+            <th>Mesaj İçeriği</th>
+            <th>Müşteri Eşleşmesi</th>
+            <th>Bağlı Sipariş</th>
+            <th class="td-action">İşlem</th>
+          </tr>
+        </thead>
+        <tbody id="messages-body">
+          <tr><td colspan="7" class="td-muted" style="text-align:center;padding:36px">Yükleniyor...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+  import { renderSidebar, api, toast, openModal, closeModal, fmtDate } from '/js/shared.js'
+
+  renderSidebar('whatsapp')
+
+  let allMessages = []
+  let activeTab = 'all'
+
+  async function loadConfig() {
+    try {
+      const cfg = await api('/integrations/whatsapp/config')
+      if (!cfg) return
+
+      const msgEl = document.getElementById('status-message')
+      if (msgEl) msgEl.textContent = cfg.status_message || 'Yerel temel aktif'
+
+      const bToken = document.getElementById('badge-token')
+      if (bToken) {
+        bToken.textContent = cfg.verify_token_configured ? 'Verify Token: Hazır' : 'Verify Token: Eksik'
+        bToken.className = 'cfg-badge ' + (cfg.verify_token_configured ? 'cfg-ok' : 'cfg-warn')
+      }
+
+      const bSecret = document.getElementById('badge-secret')
+      if (bSecret) {
+        bSecret.textContent = cfg.app_secret_configured ? 'App Secret: Hazır' : 'App Secret: Eksik'
+        bSecret.className = 'cfg-badge ' + (cfg.app_secret_configured ? 'cfg-ok' : 'cfg-warn')
+      }
+
+      const bPhone = document.getElementById('badge-phone')
+      if (bPhone) {
+        bPhone.textContent = cfg.phone_number_id_configured ? 'Phone ID: Hazır' : 'Phone ID: Tanımsız'
+        bPhone.className = 'cfg-badge ' + (cfg.phone_number_id_configured ? 'cfg-ok' : 'cfg-missing')
+      }
+
+      const bWeb = document.getElementById('badge-webhook')
+      if (bWeb) {
+        bWeb.textContent = cfg.public_webhook_ready ? 'Webhook: Canlı' : 'Webhook: Yerel (/api/webhooks/whatsapp)'
+        bWeb.className = 'cfg-badge ' + (cfg.public_webhook_ready ? 'cfg-ok' : 'cfg-missing')
+      }
+    } catch (e) {
+      console.warn('WhatsApp config load error:', e)
+    }
+  }
+
+  async function loadMessages() {
+    const tbody = document.getElementById('messages-body')
+    try {
+      const res = await api(`/integrations/whatsapp/messages?status=${activeTab}`)
+      if (!res) return
+
+      const summary = res.summary || {}
+      document.getElementById('kpi-total').textContent = summary.total || 0
+      document.getElementById('kpi-matched').textContent = summary.matched || 0
+      document.getElementById('kpi-suggested').textContent = summary.suggested || 0
+      document.getElementById('kpi-unmatched').textContent = summary.unmatched || 0
+
+      allMessages = res.messages || []
+      renderTable()
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="7" class="td-muted" style="text-align:center;padding:36px;color:var(--red)">Hata: ${err.message}</td></tr>`
+    }
+  }
+
+  function getMatchChip(item) {
+    if (item.match_status === 'matched' && item.matched_customer) {
+      return `<span class="chip chip-green" title="Decco Müşteri #${item.matched_customer.id}">✅ ${escapeHtml(item.matched_customer.name)}</span>`
+    }
+    if (item.match_status === 'suggested' && item.suggested_customers?.[0]) {
+      return `<span class="chip chip-blue" title="Öneri: ${escapeHtml(item.suggested_customers[0].phone)}">💡 Öneri: ${escapeHtml(item.suggested_customers[0].name)}</span>`
+    }
+    if (item.match_status === 'ambiguous') {
+      return `<span class="chip chip-yellow">⚠️ Çoklu Aday (${item.suggested_customers?.length})</span>`
+    }
+    return `<span class="chip chip-gray">Eşleşmedi</span>`
+  }
+
+  function escapeHtml(str) {
+    if (!str) return ''
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('messages-body')
+    const q = (document.getElementById('search-input')?.value || '').toLowerCase().trim()
+
+    const filtered = allMessages.filter(m => {
+      if (!q) return true
+      const fullStr = `${m.sender_name || ''} ${m.phone || ''} ${m.wa_id || ''} ${m.message_id || ''} ${m.text || ''} ${m.matched_customer?.name || ''}`.toLowerCase()
+      return fullStr.includes(q)
+    })
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="td-muted" style="text-align:center;padding:36px">Kayıt bulunamadı.</td></tr>`
+      return
+    }
+
+    tbody.innerHTML = filtered.map(m => {
+      const orderHtml = m.order_id
+        ? `<a href="/orders.html" class="chip chip-blue" style="text-decoration:none">#${escapeHtml(m.order_no || m.order_id)}</a>`
+        : `<span style="color:var(--text-secondary);font-size:.8rem">—</span>`
+
+      return `
+        <tr>
+          <td style="white-space:nowrap">
+            <div style="font-weight:600">${fmtDate(m.message_timestamp)}</div>
+            <div style="font-size:.72rem;color:var(--text-secondary);font-family:monospace">${new Date(m.message_timestamp).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</div>
+          </td>
+          <td>
+            <div style="font-weight:600">${escapeHtml(m.sender_name || 'Bilinmiyor')}</div>
+            <div><span class="phone-pill">${escapeHtml(m.phone || m.wa_id)}</span></div>
+          </td>
+          <td>
+            <span class="chip chip-gray" style="font-size:.72rem">${escapeHtml(m.message_type)}</span>
+          </td>
+          <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(m.text)}">
+            ${escapeHtml(m.text || '—')}
+          </td>
+          <td>${getMatchChip(m)}</td>
+          <td>${orderHtml}</td>
+          <td class="td-action">
+            <button class="btn btn-secondary btn-sm btn-open-detail" data-id="${m.id}">Detay & Eşle</button>
+          </td>
+        </tr>
+      `
+    }).join('')
+
+    // Event listeners
+    tbody.querySelectorAll('.btn-open-detail').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = parseInt(btn.dataset.id, 10)
+        const item = allMessages.find(x => x.id === id)
+        if (item) openDetailModal(item)
+      })
+    })
+  }
+
+  function openDetailModal(item) {
+    const rawJsonStr = item.raw_message ? JSON.stringify(item.raw_message, null, 2) : '{}'
+
+    let matchSectionHtml = ''
+    if (item.match_status === 'matched' && item.matched_customer) {
+      matchSectionHtml = `
+        <div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:12px;margin-bottom:14px">
+          <div style="font-weight:700;color:var(--green);font-size:.85rem;margin-bottom:4px">✅ Eşleşmiş Müşteri</div>
+          <div><strong>${escapeHtml(item.matched_customer.name)}</strong> (ID: #${item.matched_customer.id}, Tel: ${escapeHtml(item.matched_customer.phone || '—')})</div>
+        </div>
+      `
+    } else if (item.suggested_customers && item.suggested_customers.length > 0) {
+      const candidates = item.suggested_customers.map(c => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+          <div>
+            <strong>${escapeHtml(c.name)}</strong> <span style="color:var(--text-secondary);font-size:.8rem">(ID: #${c.id} - ${escapeHtml(c.phone)})</span>
+          </div>
+          <button class="btn btn-primary btn-sm btn-do-match" data-msg-id="${item.id}" data-cust-id="${c.id}">Bu Müşteriyi Eşle</button>
+        </div>
+      `).join('')
+
+      matchSectionHtml = `
+        <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.3);border-radius:8px;padding:12px;margin-bottom:14px">
+          <div style="font-weight:700;color:var(--blue);font-size:.85rem;margin-bottom:8px">💡 Telefon İle Eşleşen Öneriler</div>
+          ${candidates}
+        </div>
+      `
+    } else {
+      matchSectionHtml = `
+        <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:14px">
+          <div style="font-weight:700;color:var(--text-secondary);font-size:.85rem;margin-bottom:6px">❓ Eşleşmemiş Numara</div>
+          <p style="font-size:.8rem;color:var(--text-secondary);margin-bottom:10px">Bu numara için kayıtlı Decco OS müşteri kartı bulunamadı. Müşteri ID girerek manuel eşleştirebilirsiniz:</p>
+          <div style="display:flex;gap:8px">
+            <input type="number" id="manual-cust-id" placeholder="Müşteri ID..." style="width:140px;padding:6px 10px;font-size:.85rem" />
+            <button class="btn btn-secondary btn-sm" id="btn-manual-match" data-msg-id="${item.id}">Müşteriye Bağla</button>
+          </div>
+        </div>
+      `
+    }
+
+    // Sipariş bağlama bölümü
+    let orderSectionHtml = ''
+    if (item.match_status !== 'matched') {
+      orderSectionHtml = `
+        <div style="padding:10px;background:var(--surface-2);border-radius:6px;font-size:.8rem;color:var(--text-secondary)">
+          ℹ️ Sipariş bağlamak için önce mesajın bir müşteriye eşleştirilmiş olması gereklidir.
+        </div>
+      `
+    } else {
+      const orders = item.candidate_orders || []
+      const orderOptions = orders.map(o => `
+        <option value="${o.id}" ${item.order_id === o.id ? 'selected' : ''}>
+          #${escapeHtml(o.order_no || o.id)} — ₺${Number(o.total_amount || 0).toLocaleString('tr-TR')} (${escapeHtml(o.status)})
+        </option>
+      `).join('')
+
+      orderSectionHtml = `
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <select id="select-order-id" style="flex:1;min-width:200px;padding:7px 10px;font-size:.85rem;border-radius:6px;border:1px solid var(--border);background:var(--surface)">
+            <option value="">— Sipariş Seçin —</option>
+            ${orderOptions}
+          </select>
+          <button class="btn btn-primary btn-sm" id="btn-link-order" data-msg-id="${item.id}">Siparişi Bağla</button>
+          ${item.order_id ? `<button class="btn btn-secondary btn-sm" id="btn-unlink-order" data-msg-id="${item.id}">Bağı Kaldır</button>` : ''}
+        </div>
+      `
+    }
+
+    const html = `
+      <div class="modal-header">
+        <div style="font-weight:700;font-size:1.05rem">WhatsApp Mesaj Detayı</div>
+        <button class="btn-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body modal-xl">
+        <div class="msg-preview-box">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px;font-size:.82rem">
+            <div><span style="color:var(--text-secondary)">Mesaj ID:</span> <br/><span style="font-family:monospace">${escapeHtml(item.message_id)}</span></div>
+            <div><span style="color:var(--text-secondary)">WhatsApp ID:</span> <br/><span class="phone-pill">${escapeHtml(item.wa_id)}</span></div>
+            <div><span style="color:var(--text-secondary)">Gönderici:</span> <br/><strong>${escapeHtml(item.sender_name || 'Bilinmiyor')}</strong></div>
+            <div><span style="color:var(--text-secondary)">Tarih:</span> <br/>${fmtDate(item.message_timestamp)} ${new Date(item.message_timestamp).toLocaleTimeString('tr-TR')}</div>
+          </div>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="color:var(--text-secondary);font-size:.78rem;font-weight:600;margin-bottom:4px">Mesaj İçeriği (${escapeHtml(item.message_type)}):</div>
+            <div style="background:var(--surface);padding:10px 12px;border-radius:6px;border:1px solid var(--border);font-size:.88rem">
+              ${escapeHtml(item.text || '—')}
+            </div>
+          </div>
+        </div>
+
+        <div style="font-weight:700;font-size:.9rem;margin-bottom:6px">Müşteri Eşleştirmesi</div>
+        ${matchSectionHtml}
+
+        <div style="font-weight:700;font-size:.9rem;margin-top:16px;margin-bottom:6px">Sipariş Bağlantısı</div>
+        ${orderSectionHtml}
+
+        <div style="margin-top:20px">
+          <div style="font-weight:700;font-size:.8rem;color:var(--text-secondary);margin-bottom:4px">Ham Mesaj Payload (Salt Okunur):</div>
+          <div class="raw-box">${escapeHtml(rawJsonStr)}</div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal()">Kapat</button>
+      </div>
+    `
+
+    openModal(html, 'modal-xl')
+
+    // Bind modal actions
+    const modalEl = document.getElementById('modal-overlay')
+    if (!modalEl) return
+
+    // Candidate match click
+    modalEl.querySelectorAll('.btn-do-match').forEach(b => {
+      b.addEventListener('click', async () => {
+        const mId = b.dataset.msgId
+        const cId = b.dataset.custId
+        await doMatchCustomer(mId, cId)
+      })
+    })
+
+    // Manual match click
+    const btnManual = modalEl.querySelector('#btn-manual-match')
+    if (btnManual) {
+      btnManual.addEventListener('click', async () => {
+        const inp = modalEl.querySelector('#manual-cust-id')
+        const cId = inp ? inp.value.trim() : ''
+        if (!cId) { toast('Lütfen bir müşteri ID girin', 'error'); return }
+        await doMatchCustomer(btnManual.dataset.msgId, cId)
+      })
+    }
+
+    // Link order click
+    const btnLink = modalEl.querySelector('#btn-link-order')
+    if (btnLink) {
+      btnLink.addEventListener('click', async () => {
+        const sel = modalEl.querySelector('#select-order-id')
+        const oId = sel ? sel.value : ''
+        if (!oId) { toast('Lütfen bir sipariş seçin', 'error'); return }
+        await doLinkOrder(btnLink.dataset.msgId, oId)
+      })
+    }
+
+    // Unlink order click
+    const btnUnlink = modalEl.querySelector('#btn-unlink-order')
+    if (btnUnlink) {
+      btnUnlink.addEventListener('click', async () => {
+        await doLinkOrder(btnUnlink.dataset.msgId, null)
+      })
+    }
+  }
+
+  async function doMatchCustomer(msgId, custId) {
+    try {
+      const res = await api(`/integrations/whatsapp/messages/${msgId}/match-customer`, {
+        method: 'POST',
+        body: { customer_id: custId }
+      })
+      if (res.ok) {
+        toast(`Müşteri başarıyla bağlandı (#${res.customer_id} - ${res.customer_name})`, 'success')
+        closeModal()
+        await loadMessages()
+      }
+    } catch (err) {
+      toast(`Eşleme başarısız: ${err.message}`, 'error')
+    }
+  }
+
+  async function doLinkOrder(msgId, orderId) {
+    try {
+      const res = await api(`/integrations/whatsapp/messages/${msgId}/link-order`, {
+        method: 'POST',
+        body: { order_id: orderId }
+      })
+      if (res.ok) {
+        toast(res.unlinked ? 'Sipariş bağı kaldırıldı' : `Sipariş #${res.order_no || res.order_id} bağlandı`, 'success')
+        closeModal()
+        await loadMessages()
+      }
+    } catch (err) {
+      toast(`Sipariş bağlama başarısız: ${err.message}`, 'error')
+    }
+  }
+
+  // Event Listeners
+  document.getElementById('btn-refresh')?.addEventListener('click', () => {
+    loadConfig()
+    loadMessages()
+    toast('Yenilendi', 'info')
+  })
+
+  document.getElementById('search-input')?.addEventListener('input', () => {
+    renderTable()
+  })
+
+  document.querySelectorAll('.filter-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'))
+      tab.classList.add('active')
+      activeTab = tab.dataset.status
+      loadMessages()
+    })
+  })
+
+  // Init
+  loadConfig()
+  loadMessages()
+</script>
+</body>
+</html>

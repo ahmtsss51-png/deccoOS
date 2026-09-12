@@ -1065,3 +1065,34 @@ CREATE INDEX IF NOT EXISTS idx_paytr_history_txns_date
 
 CREATE INDEX IF NOT EXISTS idx_paytr_history_matches_order_id
   ON paytr_history_matches(order_id);
+
+-- ===========================================================================
+-- WHATSAPP NORMALİZE MESAJLAR (WHATSAPP MESSAGES)
+-- Meta WhatsApp Cloud API gelen mesajlarının yapısal defteri
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS whatsapp_messages (
+  id                   BIGSERIAL PRIMARY KEY,
+  integration_event_id BIGINT REFERENCES integration_events(id) ON DELETE SET NULL,
+  message_id           VARCHAR(255) NOT NULL UNIQUE,
+  wa_id                VARCHAR(100) NOT NULL,
+  phone                VARCHAR(100) NOT NULL,
+  sender_name          VARCHAR(255),
+  message_timestamp    TIMESTAMPTZ NOT NULL,
+  message_type         VARCHAR(50) NOT NULL,
+  text                 TEXT,
+  direction            VARCHAR(20) NOT NULL DEFAULT 'inbound',
+  order_id             INT NULL REFERENCES orders(id) ON DELETE SET NULL,
+  raw_message          JSONB NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_wa_id
+  ON whatsapp_messages(wa_id);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_timestamp
+  ON whatsapp_messages(message_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_order_id
+  ON whatsapp_messages(order_id);
+

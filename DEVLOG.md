@@ -374,3 +374,44 @@ Geçmiş PayTR hareketleri Decco OS içinde `customer_payments` veya `orders.pai
     - Express `SyntaxError` (bozuk/çift tırnaklı JSON body) `api/src/index.js` global error handler'ında `400 INVALID_JSON_BODY` koduna sanitize edilir.
     - UI toast katmanında `safeUserError` ile `Unexpected token`, `is not valid JSON`, `SyntaxError` gibi teknik detaylar filtrelenir; kullanıcıya güvenli Türkçe bildirim gösterilir, teknik detay console'da saklanır.
     - Canlı PayTR upstream çağrısı yapılmadan önce non-production ortamında `?mock=1` query parametresi ve mock test desteği eklenmiş, browser subagent ile Network payload, status 200 ve toast temizliği doğrulanmıştır.
+
+---
+
+## WhatsApp Entegrasyonu — Meta WhatsApp Cloud API Yerel Temeli (Foundation) (2026-09-12)
+
+Meta WhatsApp Cloud API entegrasyonu için yerel temel (local foundation) mimarisi başarıyla tamamlandı.
+
+### Temel Güvenlik ve Mimari İlkeler:
+1. **İki Katmanlı Ledger (Immutable Inbox + Normalized Messages):**
+   - `integration_events`: Gelen ham webhook verisini `provider = 'whatsapp'`, `event_key = 'sha256:' + bodySha256` ile değiştirilemez (immutable) audit ledger olarak saklar. Manuel müşteri veya sipariş işlemlerinde `integration_events.payload` ASLA değiştirilmez.
+   - `whatsapp_messages`: `integration_event_id`, `message_id` (UNIQUE), `wa_id`, `phone`, `sender_name`, `message_timestamp`, `message_type`, `text`, `direction`, `order_id` ve `raw_message` alanlarıyla normalize mesaj defteridir.
+2. **Tek DB Transaction İçinde Atomik İşleme:**
+   - Webhook alımında `integration_events` kaydı ve o payload'dan çıkarılan tüm `whatsapp_messages` satırları tek bir PostgreSQL transaction'ı içinde (`BEGIN ... COMMIT`) çalışır. Yarım event veya yetim normalize mesaj durumu oluşmaz.
+3. **Anlamlı `event_type` Sınıflandırması:**
+   - Webhook içeriğine göre `integration_events.event_type` açıkça `messages`, `statuses`, `mixed` veya `unknown` değerini alır.
+4. **Fail-Closed HMAC-SHA256 Güvenliği:**
+   - Mevcut `req.rawBody` buffer mimarisi yeniden kullanılmıştır; ek body-parser middleware eklenmemiştir.
+   - `WHATSAPP_APP_SECRET` tanımlı değilse fail-closed (500) davranır; unsigned payload kesinlikle kabul edilmez.
+   - `X-Hub-Signature-256` header'ı `crypto.timingSafeEqual` ile sabit süreli doğrulanır.
+   - Meta GET webhook challenge doğrulaması: `hub.mode === 'subscribe'` ve timing-safe token eşleşmesinde `hub.challenge` plain text (200), aksi halde 403 Forbidden döner.
+   - Hiçbir config endpoint'inde secret/token düz metin dönmez; yalnız `true/false` durumları döner.
+5. **Çoklu Mesaj ve Zengin Metin Desteği:**
+   - Bir webhook içinde gelen birden fazla mesaj bağımsız ve `message_id` bazında idempotent (`ON CONFLICT DO NOTHING`) işlenir.
+   - `text.body`, `image.caption`, `video.caption`, `document.caption`/`filename`, `interactive.button_reply.title`, `interactive.list_reply.title`, `location` ve `button.text` yapıları normalize edilir.
+   - Teslimat/okundu bildirimleri (`statuses`) mutasyonsuz 200 ACK ile karşılanır.
+6. **Sıfır Otomatik Domain Mutasyonu & Çakışma Korumalı Eşleştirme:**
+   - Otomatik müşteri veya sipariş açılmaz.
+   - `customer_external_refs(provider='whatsapp', external_id=wa_id)` varsa `matched`, yoksa `PHONE_CANON_SQL` ile `suggested` (tek aday), `unmatched` (sıfır aday) veya `ambiguous` (çoklu aday).
+   - Manuel `POST .../match-customer`: Aynı müşteri için idempotent başarı (200), başka müşteriye bağlı `wa_id` için **409 Conflict** (`conflict_existing_customer_id`) döner.
+   - Manuel `POST .../link-order`: Mesaj eşleşmemişse 422 (`customer_not_matched`), sipariş başka müşteriye aitse **409 Conflict** (`order_customer_mismatch`) döner. Doğrudan `whatsapp_messages.order_id` alanını günceller.
+7. **İzole Test Paketi (`test_whatsapp_foundation.js`):**
+   - Sıfır dış API çağrısı.
+   - `testRunId` ve explicit ID takibi; `finally` bloğunda yalnız takip edilen ID'lerin silinmesi.
+   - `afterCount === beforeCount` kesin baseline sayaç doğrulaması (Customers: 40, Orders: 43, Events: 0, Messages: 0, Refs: 0).
+8. **Kullanıcı Arayüzü (`web/src/integrations-whatsapp.html`):**
+   - Sol menüye WhatsApp bağlantısı eklendi.
+   - Bağlantı & Kurulum Durumu (Yerel temel aktif uyarısı, token ve secret rozetleri).
+   - 4 KPI Kartı (Toplam, Eşleşen, Öneri Bekleyen, Eşleşmeyen).
+   - Sekmeler (Tümü, Eşleşmeyenler, Önerilenler, Eşleşenler), arama çubuğu ve gelen mesajlar tablosu.
+   - Detay, salt-okunur ham payload önizleme, müşteri eşleştirme ve sipariş bağlama modalı.
+

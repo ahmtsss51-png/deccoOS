@@ -3524,4 +3524,322 @@ router.post('/paytr/history/:id/verify', async (req, res, next) => {
   }
 })
 
+// ===========================================================================
+// WHATSAPP CLOUD API ENTEGRASYON YÖNETİM UÇLARI (FOUNDATION)
+// ===========================================================================
+
+/**
+ * GET /api/integrations/whatsapp/config
+ * Returns integration status without exposing any secret or token.
+ */
+router.get('/whatsapp/config', async (req, res, next) => {
+  try {
+    const verifyConfigured = Boolean(process.env.WHATSAPP_VERIFY_TOKEN)
+    const secretConfigured = Boolean(process.env.WHATSAPP_APP_SECRET)
+    const phoneConfigured = Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID)
+    const publicWebhookReady = Boolean(process.env.WHATSAPP_PUBLIC_WEBHOOK_URL)
+
+    res.json({
+      verify_token_configured: verifyConfigured,
+      app_secret_configured: secretConfigured,
+      phone_number_id_configured: phoneConfigured,
+      public_webhook_ready: publicWebhookReady,
+      webhook_path: '/api/webhooks/whatsapp',
+      status_message: publicWebhookReady
+        ? 'WhatsApp Cloud API bağlantısı hazır'
+        : 'Sunucu bağlantısı bekleniyor (Yerel temel aktif)'
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * GET /api/integrations/whatsapp/messages
+ * Lists normalized WhatsApp messages with customer match status and linked order.
+ */
+router.get('/whatsapp/messages', async (req, res, next) => {
+  try {
+    const filterStatus = req.query.status || 'all'
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
+
+    const { rows: msgRows } = await query(
+      `SELECT m.id, m.integration_event_id, m.message_id, m.wa_id, m.phone,
+              m.sender_name, m.message_timestamp, m.message_type, m.text,
+              m.direction, m.order_id, m.raw_message, m.created_at,
+              o.order_no, o.status AS order_status, o.total_amount AS order_total_amount,
+              r.customer_id AS direct_customer_id,
+              c_direct.name AS direct_customer_name,
+              c_direct.phone AS direct_customer_phone
+       FROM whatsapp_messages m
+       LEFT JOIN orders o ON o.id = m.order_id
+       LEFT JOIN customer_external_refs r ON r.provider = 'whatsapp' AND r.external_id = m.wa_id
+       LEFT JOIN customers c_direct ON c_direct.id = r.customer_id
+       ORDER BY m.message_timestamp DESC, m.id DESC
+       LIMIT $1`,
+      [limit]
+    )
+
+    const resolvedMessages = []
+    let totalMatched = 0
+    let totalSuggested = 0
+    let totalUnmatched = 0
+
+    for (const row of msgRows) {
+      let matchStatus = 'unmatched'
+      let matchedCustomer = null
+      let suggestedCustomers = []
+
+      if (row.direct_customer_id) {
+        matchStatus = 'matched'
+        matchedCustomer = {
+          id: row.direct_customer_id,
+          name: row.direct_customer_name,
+          phone: row.direct_customer_phone
+        }
+        totalMatched++
+      } else {
+        const canonPhone = normalizePhone(row.wa_id)
+        if (canonPhone) {
+          const { rows: candidateRows } = await query(
+            `SELECT id, name, phone, email
+             FROM customers
+             WHERE deleted_at IS NULL AND is_active = true
+               AND ${PHONE_CANON_SQL} = $1
+             ORDER BY id ASC
+             LIMIT 5`,
+            [canonPhone]
+          )
+
+          if (candidateRows.length === 1) {
+            matchStatus = 'suggested'
+            suggestedCustomers = candidateRows
+            totalSuggested++
+          } else if (candidateRows.length > 1) {
+            matchStatus = 'ambiguous'
+            suggestedCustomers = candidateRows
+            totalSuggested++
+          } else {
+            matchStatus = 'unmatched'
+            totalUnmatched++
+          }
+        } else {
+          matchStatus = 'unmatched'
+          totalUnmatched++
+        }
+      }
+
+      let candidateOrders = []
+      const effectiveCustomerId = matchedCustomer?.id || (suggestedCustomers.length === 1 ? suggestedCustomers[0].id : null)
+      if (effectiveCustomerId && !row.order_id) {
+        const { rows: ordRows } = await query(
+          `SELECT id, order_no, status, total_amount, order_date
+           FROM orders
+           WHERE customer_id = $1 AND deleted_at IS NULL
+           ORDER BY order_date DESC, id DESC
+           LIMIT 5`,
+          [effectiveCustomerId]
+        )
+        candidateOrders = ordRows
+      }
+
+      const item = {
+        id: Number(row.id),
+        integration_event_id: row.integration_event_id ? Number(row.integration_event_id) : null,
+        message_id: row.message_id,
+        wa_id: row.wa_id,
+        phone: row.phone,
+        sender_name: row.sender_name,
+        message_timestamp: row.message_timestamp,
+        message_type: row.message_type,
+        text: row.text,
+        direction: row.direction,
+        order_id: row.order_id ? Number(row.order_id) : null,
+        order_no: row.order_no || null,
+        order_status: row.order_status || null,
+        order_total_amount: row.order_total_amount || null,
+        raw_message: row.raw_message,
+        match_status: matchStatus,
+        matched_customer: matchedCustomer,
+        suggested_customers: suggestedCustomers,
+        candidate_orders: candidateOrders
+      }
+
+      if (filterStatus === 'all') {
+        resolvedMessages.push(item)
+      } else if (filterStatus === 'matched' && matchStatus === 'matched') {
+        resolvedMessages.push(item)
+      } else if (filterStatus === 'suggested' && (matchStatus === 'suggested' || matchStatus === 'ambiguous')) {
+        resolvedMessages.push(item)
+      } else if (filterStatus === 'unmatched' && matchStatus === 'unmatched') {
+        resolvedMessages.push(item)
+      }
+    }
+
+    res.json({
+      summary: {
+        total: msgRows.length,
+        matched: totalMatched,
+        suggested: totalSuggested,
+        unmatched: totalUnmatched
+      },
+      messages: resolvedMessages
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/whatsapp/messages/:id/match-customer
+ * Manually links a customer to a WhatsApp wa_id in customer_external_refs.
+ * Returns 409 if wa_id is already bound to another customer.
+ * Idempotent success if already bound to the same customer.
+ * Does NOT mutate integration_events.
+ */
+router.post('/whatsapp/messages/:id/match-customer', async (req, res, next) => {
+  try {
+    const messageId = parseInt(req.params.id, 10)
+    const customerId = parseInt(req.body?.customer_id, 10)
+
+    if (isNaN(messageId) || isNaN(customerId)) {
+      return res.status(400).json({ ok: false, error: 'Geçersiz mesaj veya müşteri kimliği' })
+    }
+
+    const { rows: msgRows } = await query(
+      `SELECT id, wa_id FROM whatsapp_messages WHERE id = $1`,
+      [messageId]
+    )
+    if (msgRows.length === 0) {
+      return res.status(404).json({ ok: false, code: 'message_not_found', error: 'WhatsApp mesajı bulunamadı' })
+    }
+    const waId = msgRows[0].wa_id
+
+    const { rows: custRows } = await query(
+      `SELECT id, name, is_active, deleted_at FROM customers WHERE id = $1`,
+      [customerId]
+    )
+    if (custRows.length === 0 || custRows[0].deleted_at !== null) {
+      return res.status(404).json({ ok: false, code: 'customer_not_found', error: 'Müşteri bulunamadı veya silinmiş' })
+    }
+    if (!custRows[0].is_active) {
+      return res.status(422).json({ ok: false, code: 'customer_inactive', error: 'Seçilen müşteri hesabı pasif durumda' })
+    }
+
+    const { rows: existingRefs } = await query(
+      `SELECT customer_id FROM customer_external_refs WHERE provider = 'whatsapp' AND external_id = $1`,
+      [waId]
+    )
+
+    if (existingRefs.length > 0) {
+      const boundCustomerId = existingRefs[0].customer_id
+      if (boundCustomerId === customerId) {
+        return res.status(200).json({
+          ok: true,
+          already_matched: true,
+          customer_id: customerId,
+          customer_name: custRows[0].name
+        })
+      } else {
+        return res.status(409).json({
+          ok: false,
+          code: 'conflict_existing_customer_id',
+          error: `Bu WhatsApp numarası (${waId}) zaten başka bir müşteriye (#${boundCustomerId}) bağlıdır.`
+        })
+      }
+    }
+
+    await query(
+      `INSERT INTO customer_external_refs (customer_id, provider, external_id)
+       VALUES ($1, 'whatsapp', $2)`,
+      [customerId, waId]
+    )
+
+    return res.status(200).json({
+      ok: true,
+      matched: true,
+      customer_id: customerId,
+      customer_name: custRows[0].name
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/whatsapp/messages/:id/link-order
+ * Directly links or unlinks an order on whatsapp_messages.order_id.
+ * Enforces:
+ * 1. Message must be matched to a customer first (422 customer_not_matched).
+ * 2. Order must belong to the matched customer (409 order_customer_mismatch).
+ * Does NOT mutate integration_events.
+ */
+router.post('/whatsapp/messages/:id/link-order', async (req, res, next) => {
+  try {
+    const messageId = parseInt(req.params.id, 10)
+    const orderId = req.body?.order_id != null ? parseInt(req.body.order_id, 10) : null
+
+    if (isNaN(messageId)) {
+      return res.status(400).json({ ok: false, error: 'Geçersiz mesaj kimliği' })
+    }
+
+    const { rows: msgRows } = await query(
+      `SELECT id, wa_id, order_id FROM whatsapp_messages WHERE id = $1`,
+      [messageId]
+    )
+    if (msgRows.length === 0) {
+      return res.status(404).json({ ok: false, code: 'message_not_found', error: 'WhatsApp mesajı bulunamadı' })
+    }
+    const waId = msgRows[0].wa_id
+
+    if (orderId === null || isNaN(orderId)) {
+      await query(`UPDATE whatsapp_messages SET order_id = NULL WHERE id = $1`, [messageId])
+      return res.status(200).json({ ok: true, unlinked: true, order_id: null })
+    }
+
+    const { rows: refRows } = await query(
+      `SELECT customer_id FROM customer_external_refs WHERE provider = 'whatsapp' AND external_id = $1`,
+      [waId]
+    )
+    if (refRows.length === 0) {
+      return res.status(422).json({
+        ok: false,
+        code: 'customer_not_matched',
+        error: 'Sipariş bağlamadan önce mesaj bir müşteriye eşleştirilmelidir'
+      })
+    }
+    const matchedCustomerId = refRows[0].customer_id
+
+    const { rows: ordRows } = await query(
+      `SELECT id, order_no, customer_id, deleted_at FROM orders WHERE id = $1`,
+      [orderId]
+    )
+    if (ordRows.length === 0 || ordRows[0].deleted_at !== null) {
+      return res.status(404).json({ ok: false, code: 'order_not_found', error: 'Sipariş bulunamadı veya silinmiş' })
+    }
+    if (ordRows[0].customer_id !== matchedCustomerId) {
+      return res.status(409).json({
+        ok: false,
+        code: 'order_customer_mismatch',
+        error: 'Seçilen sipariş mesajın eşleştiği müşteriye ait değil'
+      })
+    }
+
+    await query(
+      `UPDATE whatsapp_messages SET order_id = $1 WHERE id = $2`,
+      [orderId, messageId]
+    )
+
+    return res.status(200).json({
+      ok: true,
+      linked: true,
+      order_id: orderId,
+      order_no: ordRows[0].order_no
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
 export default router
+
