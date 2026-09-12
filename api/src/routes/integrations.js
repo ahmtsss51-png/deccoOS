@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { pool, query } from '../db.js'
 import { normalizePhone, PHONE_CANON_SQL } from './customers.js'
 import { applyCustomerPayment } from './finance.js'
+import { queryPaytrStatus } from '../services/paytr.js'
 
 const router = Router()
 
@@ -852,6 +853,57 @@ router.post('/woocommerce/events/:eventId/import', async (req, res, next) => {
     next(err)
   } finally {
     client.release()
+  }
+})
+
+/**
+ * GET /api/integrations/paytr/status/:merchantOid
+ * JWT-korumalı, salt-okunur PayTR Durum Sorgu endpoint'i.
+ * Decco OS veritabanında KESİNLİKLE hiçbir finansal veya kayıt mutasyonu YAPMAZ.
+ */
+router.get('/paytr/status/:merchantOid', async (req, res, next) => {
+  try {
+    const { merchantOid } = req.params
+
+    if (!merchantOid || /\s/.test(merchantOid)) {
+      return res.status(400).json({
+        error: 'merchant_oid boşluk içeremez ve boş olamaz',
+        code: 'INVALID_MERCHANT_OID'
+      })
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(merchantOid)) {
+      return res.status(400).json({
+        error: 'merchant_oid biçimi geçersiz',
+        code: 'INVALID_MERCHANT_OID'
+      })
+    }
+
+    const result = await queryPaytrStatus(merchantOid)
+
+    if (!result.ok) {
+      if (result.error_code === 'PAYTR_STATUS_ERROR') {
+        return res.status(422).json({
+          error: result.err_msg,
+          err_no: result.err_no,
+          code: result.error_code
+        })
+      }
+      if (result.error_code === 'PAYTR_CREDENTIALS_MISSING') {
+        return res.status(500).json({
+          error: result.message,
+          code: result.error_code
+        })
+      }
+      return res.status(502).json({
+        error: result.message,
+        code: result.error_code
+      })
+    }
+
+    res.json(result.data)
+  } catch (err) {
+    next(err)
   }
 })
 
