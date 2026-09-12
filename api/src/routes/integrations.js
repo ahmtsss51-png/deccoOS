@@ -2,7 +2,7 @@ import crypto from 'crypto'
 import { Router } from 'express'
 import { pool, query } from '../db.js'
 import { normalizePhone, PHONE_CANON_SQL } from './customers.js'
-import { applyCustomerPayment } from './finance.js'
+import { applyCustomerPayment, recordAccountExpense } from './finance.js'
 import {
   queryPaytrStatus,
   createPaytrLink,
@@ -1584,6 +1584,334 @@ router.post('/paytr/events/:eventId/process', async (req, res, next) => {
         paid_at: verifiedPaidAt,
         merchant_oid: merchantOid,
         message: 'PayTR link ödemesi başarıyla finansal tahsilata dönüştürüldü'
+      })
+
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
+    }
+
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * POST /api/integrations/paytr/payments/:paymentId/reconcile
+ * PayTR Payment Reconciliation — Commission Foundation
+ *
+ * Reconciles an already processed PayTR customer payment with PayTR Status Inquiry.
+ * Verifies merchant_oid, net amount, and commission amount, then records
+ * commission expense and paytr_reconciliations idempotently.
+ * Flow:
+ * A - Read Phase: payment + external ref + PayTR account lookup (read-only, no locks)
+ * B - Remote Verification: queryPaytrStatus(merchant_oid) (executed with ZERO DB locks held)
+ * C - Finance Transaction: single PostgreSQL transaction locking payment, account, reconciliation FOR UPDATE,
+ *     inserting paytr_reconciliations, calling recordAccountExpense if commission > 0, and linking transaction.
+ */
+router.post('/paytr/payments/:paymentId/reconcile', async (req, res, next) => {
+  try {
+    if (!(await isSystemOpen())) {
+      return res.status(423).json({
+        error: 'Sistem PRE-OPENING modunda. Finansal işlem yapılamaz.',
+        code: 'PRE_OPENING_MODE'
+      })
+    }
+
+    const paymentId = parseInt(req.params.paymentId, 10)
+    if (!Number.isInteger(paymentId) || paymentId <= 0) {
+      return res.status(400).json({ error: 'Geçersiz payment kimliği', code: 'INVALID_PAYMENT_ID' })
+    }
+
+    // A — Read phase (read-only, no locks)
+    // 1. Resolve active PayTR card account
+    const { rows: accRows } = await query(
+      `SELECT id, name, account_type, balance, is_active
+       FROM accounts
+       WHERE name = 'PayTR' AND account_type = 'card' AND is_active = true`
+    )
+    if (accRows.length !== 1) {
+      return res.status(422).json({
+        error: `Aktif PayTR kart hesabı bulunamadı veya birden fazla bulundu (${accRows.length})`,
+        code: 'PAYTR_ACCOUNT_INVALID'
+      })
+    }
+    const paytrAccount = accRows[0]
+
+    // 2. Resolve customer_payments and payment_external_refs
+    const { rows: cpRows } = await query(
+      `SELECT cp.id, cp.customer_id, cp.account_id, cp.amount, cp.paid_at,
+              r.external_id AS merchant_oid
+       FROM customer_payments cp
+       JOIN payment_external_refs r ON r.payment_id = cp.id
+       WHERE cp.id = $1 AND r.provider = 'paytr' AND r.reference_type = 'merchant_oid'`,
+      [paymentId]
+    )
+    if (cpRows.length === 0) {
+      return res.status(404).json({
+        error: 'PayTR referansına sahip müşteri tahsilatı bulunamadı',
+        code: 'PAYTR_PAYMENT_NOT_FOUND'
+      })
+    }
+    const payment = cpRows[0]
+    const merchantOid = payment.merchant_oid
+
+    // Requirement 3: customer_payments.account_id must match active PayTR account
+    if (payment.account_id !== paytrAccount.id) {
+      return res.status(409).json({
+        error: 'Tahsilat hesabı aktif PayTR hesabı ile eşleşmiyor',
+        code: 'PAYTR_PAYMENT_ACCOUNT_MISMATCH'
+      })
+    }
+
+    // B — Remote verification (queryPaytrStatus with ZERO DB locks)
+    let statusRes
+    try {
+      statusRes = await queryPaytrStatus(merchantOid)
+    } catch (err) {
+      return res.status(502).json({
+        error: 'PayTR durum sorgu servisine erişilemedi: ' + err.message,
+        code: 'PAYTR_UPSTREAM_ERROR'
+      })
+    }
+
+    if (!statusRes.ok) {
+      return res.status(502).json({
+        error: statusRes.reason || statusRes.message || 'PayTR durum sorgusu başarısız',
+        code: statusRes.error_code || 'PAYTR_QUERY_FAILED'
+      })
+    }
+
+    const statusData = statusRes.data
+
+    if (statusData.status !== 'success') {
+      return res.status(422).json({
+        error: `PayTR ödeme durumu '${statusData.status}', ödeme başarılı değil`,
+        code: 'PAYTR_STATUS_NOT_SUCCESS'
+      })
+    }
+
+    if (statusData.merchant_oid !== merchantOid) {
+      return res.status(422).json({
+        error: 'PayTR yanıtındaki merchant_oid ile sorgulanan merchant_oid uyuşmuyor',
+        code: 'PAYTR_OID_MISMATCH'
+      })
+    }
+
+    // Currency must be TL or TRY
+    const rawCurrency = (statusData.currency || '').toUpperCase()
+    if (rawCurrency !== 'TL' && rawCurrency !== 'TRY') {
+      return res.status(422).json({
+        error: `Desteklenmeyen para birimi: '${statusData.currency}'. Yalnızca TL ve TRY kabul edilir`,
+        code: 'UNSUPPORTED_PAYTR_CURRENCY'
+      })
+    }
+
+    // Returns must be empty
+    if (Array.isArray(statusData.returns) && statusData.returns.length > 0) {
+      return res.status(422).json({
+        error: 'PayTR Durum Sorgusu iade/kısmi iade kaydı içeriyor. İadeli ödemeler bu fazda mutabakata alınamaz',
+        code: 'PAYTR_REFUND_PRESENT'
+      })
+    }
+
+    // Test mode blocked in ALL environments
+    if (statusData.test_mode === 1) {
+      return res.status(422).json({
+        error: 'PayTR test modu ödemeleri için finansal mutasyon yapılamaz',
+        code: 'PAYTR_TEST_MODE_PAYMENT'
+      })
+    }
+
+    // Exact cents validations (No JS float arithmetic)
+    const paymentAmountCents = parseDecimalToCents(payment.amount)
+    if (statusData.payment_amount_cents == null || statusData.payment_amount_cents !== paymentAmountCents) {
+      return res.status(422).json({
+        error: `PayTR ödeme tutarı (${statusData.payment_amount}) ile Decco tahsilat tutarı (${payment.amount}) uyuşmuyor`,
+        code: 'PAYMENT_AMOUNT_MISMATCH'
+      })
+    }
+
+    const netCents = statusData.net_tutar_cents
+    const commissionCents = statusData.kesinti_tutari_cents
+
+    if (netCents == null || netCents < 0 || commissionCents == null || commissionCents < 0) {
+      return res.status(422).json({
+        error: 'PayTR net tutar veya kesinti tutarı geçersiz veya eksik',
+        code: 'INVALID_PAYTR_AMOUNTS'
+      })
+    }
+
+    if (paymentAmountCents !== netCents + commissionCents) {
+      return res.status(422).json({
+        error: `Ödeme tutarı (${centsToDecimalString(paymentAmountCents)}) net (${centsToDecimalString(netCents)}) ve komisyon (${centsToDecimalString(commissionCents)}) toplamına eşit değil`,
+        code: 'PAYTR_AMOUNT_SUM_MISMATCH'
+      })
+    }
+
+    const verifiedPaymentDate = parsePaytrPaymentDate(statusData.payment_date, statusData.auth_date)
+    const paymentAmountStr = centsToDecimalString(paymentAmountCents)
+    const netAmountStr = centsToDecimalString(netCents)
+    const commissionAmountStr = centsToDecimalString(commissionCents)
+    const paymentTotalStr = statusData.payment_total_cents != null ? centsToDecimalString(statusData.payment_total_cents) : null
+
+    // C — Finance transaction (Single PostgreSQL transaction)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      // 1. Lock customer_payments FOR UPDATE
+      const { rows: lockCpRows } = await client.query(
+        `SELECT id, customer_id, account_id, amount
+         FROM customer_payments
+         WHERE id = $1 FOR UPDATE`,
+        [paymentId]
+      )
+      if (lockCpRows.length === 0) {
+        await client.query('ROLLBACK')
+        return res.status(404).json({ error: 'Tahsilat bulunamadı', code: 'PAYMENT_NOT_FOUND' })
+      }
+      const curPayment = lockCpRows[0]
+
+      // 2. Lock PayTR account FOR UPDATE
+      const { rows: lockAccRows } = await client.query(
+        `SELECT id, name, account_type, balance, is_active
+         FROM accounts
+         WHERE id = $1 FOR UPDATE`,
+        [paytrAccount.id]
+      )
+      if (lockAccRows.length === 0 || !lockAccRows[0].is_active) {
+        await client.query('ROLLBACK')
+        return res.status(422).json({ error: 'PayTR hesabı aktif değil', code: 'PAYTR_ACCOUNT_INVALID' })
+      }
+
+      // Re-verify account_id
+      if (curPayment.account_id !== paytrAccount.id) {
+        await client.query('ROLLBACK')
+        return res.status(409).json({
+          error: 'Tahsilat hesabı aktif PayTR hesabı ile eşleşmiyor',
+          code: 'PAYTR_PAYMENT_ACCOUNT_MISMATCH'
+        })
+      }
+
+      // 3. Lock & check paytr_reconciliations FOR UPDATE (Idempotency & Conflict)
+      const { rows: existingRecRows } = await client.query(
+        `SELECT id, payment_id, merchant_oid, payment_amount, net_amount, commission_amount,
+                commission_transaction_id, payment_date, reconciled_at
+         FROM paytr_reconciliations
+         WHERE payment_id = $1 OR merchant_oid = $2
+         FOR UPDATE`,
+        [paymentId, merchantOid]
+      )
+
+      if (existingRecRows.length > 0) {
+        const existingRec = existingRecRows[0]
+        const isOidMatch = existingRec.merchant_oid === merchantOid
+        const isPaymentIdMatch = existingRec.payment_id === paymentId
+        const isPayAmtMatch = parseDecimalToCents(existingRec.payment_amount) === paymentAmountCents
+        const isNetAmtMatch = parseDecimalToCents(existingRec.net_amount) === netCents
+        const isCommAmtMatch = parseDecimalToCents(existingRec.commission_amount) === commissionCents
+
+        if (isOidMatch && isPaymentIdMatch && isPayAmtMatch && isNetAmtMatch && isCommAmtMatch) {
+          // Idempotent success
+          await client.query('COMMIT')
+          return res.status(200).json({
+            ok: true,
+            already_reconciled: true,
+            reconciliation_id: existingRec.id,
+            payment_id: paymentId,
+            merchant_oid: merchantOid,
+            payment_amount: paymentAmountStr,
+            net_amount: netAmountStr,
+            commission_amount: commissionAmountStr,
+            commission_transaction_id: existingRec.commission_transaction_id,
+            payment_date: existingRec.payment_date,
+            message: 'Mutabakat zaten kayıtlı ve doğrulandı (idempotent)'
+          })
+        } else {
+          // Conflict
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'Mevcut mutabakat kaydı ile PayTR sorgu sonucu uyuşmuyor',
+            code: 'PAYTR_RECONCILIATION_CONFLICT'
+          })
+        }
+      }
+
+      // 4. Requirement 4: Insert paytr_reconciliations FIRST with commission_transaction_id = NULL
+      let recId
+      try {
+        const { rows: newRecRows } = await client.query(
+          `INSERT INTO paytr_reconciliations (
+             payment_id, merchant_oid, payment_amount, payment_total,
+             net_amount, commission_amount, payment_date,
+             commission_transaction_id, reconciled_at
+           ) VALUES (
+             $1, $2, $3, $4,
+             $5, $6, $7,
+             NULL, NOW()
+           ) RETURNING id`,
+          [
+            paymentId,
+            merchantOid,
+            paymentAmountStr,
+            paymentTotalStr,
+            netAmountStr,
+            commissionAmountStr,
+            verifiedPaymentDate
+          ]
+        )
+        recId = newRecRows[0].id
+      } catch (insertErr) {
+        if (insertErr.code === '23505') {
+          // Unique violation race condition
+          await client.query('ROLLBACK')
+          return res.status(409).json({
+            error: 'Eşzamanlı istek sonucunda mutabakat kaydı zaten oluşturuldu',
+            code: 'PAYTR_RECONCILIATION_CONFLICT'
+          })
+        }
+        throw insertErr
+      }
+
+      // 5. If commission_amount > 0, record account expense using reusable domain helper
+      let commissionTxId = null
+      if (commissionCents > 0) {
+        const expDesc = `PayTR Komisyon Kesintisi (OID: ${merchantOid})`
+        const expResult = await recordAccountExpense(client, {
+          account_id: paytrAccount.id,
+          amount: commissionAmountStr,
+          description: expDesc,
+          category: 'Banka/Komisyon',
+          transaction_date: verifiedPaymentDate,
+          reference_type: 'paytr_reconciliation',
+          reference_id: recId
+        })
+        commissionTxId = expResult.transaction_id
+
+        // Update paytr_reconciliations.commission_transaction_id
+        await client.query(
+          `UPDATE paytr_reconciliations SET commission_transaction_id = $1 WHERE id = $2`,
+          [commissionTxId, recId]
+        )
+      }
+
+      await client.query('COMMIT')
+
+      return res.status(200).json({
+        ok: true,
+        reconciliation_id: recId,
+        payment_id: paymentId,
+        merchant_oid: merchantOid,
+        payment_amount: paymentAmountStr,
+        payment_total: paymentTotalStr,
+        net_amount: netAmountStr,
+        commission_amount: commissionAmountStr,
+        payment_date: verifiedPaymentDate,
+        commission_transaction_id: commissionTxId,
+        message: 'PayTR komisyon ve net tutar mutabakatı başarıyla kaydedildi'
       })
 
     } catch (err) {

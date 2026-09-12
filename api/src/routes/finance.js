@@ -109,8 +109,64 @@ export async function applyCustomerPayment(client, { customer_id, account_id, am
   return { payment_id: paymentId, allocations: allocs }
 }
 
+/**
+ * Shared domain helper for recording an account expense.
+ * Accepts positive amount (either exact decimal string or positive number).
+ * Books a negative amount in transactions (amount = -positive_amount) with transaction_type = 'expense'.
+ * Deducts amount from accounts.balance (balance = balance - positive_amount).
+ * Validates assertAccountReady(account_id).
+ * Avoids JS floating-point arithmetic by passing the exact string to SQL NUMERIC operations.
+ * Returns { transaction_id }.
+ */
+export async function recordAccountExpense(client, {
+  account_id,
+  amount,
+  description,
+  category = 'Banka/Komisyon',
+  transaction_date,
+  reference_type,
+  reference_id
+}) {
+  if (!account_id) {
+    throw Object.assign(new Error('Hesap zorunludur'), { status: 400 })
+  }
+  const amtStr = String(amount).trim()
+  if (!amtStr || !/^\d+(\.\d{1,2})?$/.test(amtStr) || parseFloat(amtStr) <= 0) {
+    throw Object.assign(new Error('Geçerli ve pozitif bir gider tutarı giriniz'), { status: 400 })
+  }
+
+  await assertAccountReady(account_id)
+
+  const { rows } = await client.query(
+    `INSERT INTO transactions (
+       account_id, amount, transaction_type, category,
+       description, transaction_date, reference_type, reference_id
+     ) VALUES (
+       $1, (-1 * $2::numeric), 'expense', $3,
+       $4, COALESCE($5::timestamptz, NOW()), $6, $7
+     ) RETURNING id`,
+    [
+      account_id,
+      amtStr,
+      category || null,
+      description || null,
+      transaction_date || null,
+      reference_type || null,
+      reference_id || null
+    ]
+  )
+
+  await client.query(
+    `UPDATE accounts SET balance = balance - $1::numeric WHERE id = $2`,
+    [amtStr, account_id]
+  )
+
+  return { transaction_id: rows[0].id }
+}
+
 // Açık alacaklı müşteriler + siparişleri
 router.get('/receivables', async (_req, res, next) => {
+
   try {
     const { rows } = await query(`
       SELECT c.id AS customer_id, c.name AS customer_name, c.phone,

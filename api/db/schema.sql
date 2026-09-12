@@ -913,3 +913,29 @@ CREATE TABLE IF NOT EXISTS payment_external_refs (
   CONSTRAINT payment_external_refs_provider_ref_ext_uniq UNIQUE (provider, reference_type, external_id),
   CONSTRAINT payment_external_refs_payment_provider_ref_uniq UNIQUE (payment_id, provider, reference_type)
 );
+
+-- ===========================================================================
+-- PAYTR MUTABAKAT VE KOMİSYON KAYITLARI (PAYTR RECONCILIATIONS)
+-- Tahsilat düzeyinde PayTR durum sorgusu ile teyit edilen net ve komisyon mutabakatını saklar
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS paytr_reconciliations (
+  id                        SERIAL PRIMARY KEY,
+  payment_id                INT NOT NULL REFERENCES customer_payments(id),
+  merchant_oid              VARCHAR(255) NOT NULL,
+  payment_amount            NUMERIC(14,2) NOT NULL,
+  payment_total             NUMERIC(14,2) NULL,
+  net_amount                NUMERIC(14,2) NOT NULL,
+  commission_amount         NUMERIC(14,2) NOT NULL,
+  payment_date              TIMESTAMPTZ NULL,
+  commission_transaction_id INT NULL REFERENCES transactions(id),
+  reconciled_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT paytr_reconciliations_payment_amount_pos CHECK (payment_amount > 0),
+  CONSTRAINT paytr_reconciliations_net_amount_nonneg CHECK (net_amount >= 0),
+  CONSTRAINT paytr_reconciliations_commission_amount_nonneg CHECK (commission_amount >= 0),
+  CONSTRAINT paytr_reconciliations_sum_check CHECK (payment_amount = net_amount + commission_amount),
+  CONSTRAINT paytr_reconciliations_oid_not_empty CHECK (length(trim(merchant_oid)) > 0),
+  CONSTRAINT paytr_reconciliations_oid_canonical CHECK (merchant_oid = trim(merchant_oid)),
+  CONSTRAINT paytr_reconciliations_payment_id_uniq UNIQUE (payment_id),
+  CONSTRAINT paytr_reconciliations_merchant_oid_uniq UNIQUE (merchant_oid)
+);
