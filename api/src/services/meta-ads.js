@@ -4,6 +4,7 @@
  *
  * Requirements:
  * - Read-only ad account details: id, name, currency, timezone, amount_spent, balance.
+ * - Read-only insights: daily (account level) and campaigns (campaign level).
  * - Zero DB mutations.
  * - Secure error handling: access tokens are NEVER logged or leaked.
  * - Request timeout via AbortSignal.
@@ -46,18 +47,77 @@ export function sanitizeErrorMessage(message, token) {
 }
 
 /**
- * Fetches ad account details from Meta Graph API.
- *
- * @param {Object} [options]
- * @param {string} [options.accessToken]
- * @param {string} [options.adAccountId]
- * @param {string} [options.apiVersion='v26.0']
- * @param {string} [options.baseUrl='https://graph.facebook.com']
- * @param {number} [options.timeoutMs=10000]
- * @param {Function} [options.fetchFn=globalThis.fetch]
- * @returns {Promise<{ id: string, name: string, currency: string, timezone: string, timezone_name: string, amount_spent: string, balance: string }>}
+ * Normalizes numbers safely from API strings.
  */
-export async function getAdAccountDetails(options = {}) {
+export function toFloat(v) {
+  if (v == null || v === '') return 0
+  const n = parseFloat(v)
+  return isNaN(n) ? 0 : n
+}
+
+export function toInt(v) {
+  if (v == null || v === '') return 0
+  const n = parseInt(v, 10)
+  return isNaN(n) ? 0 : n
+}
+
+/**
+ * Maps Meta API action array to exposed action metrics.
+ * Missing actions default to 0.
+ */
+export function parseActions(actionsArray) {
+  const map = {}
+  if (Array.isArray(actionsArray)) {
+    for (const a of actionsArray) {
+      if (a && a.action_type) {
+        const val = toInt(a.value)
+        map[a.action_type] = val
+      }
+    }
+  }
+
+  return {
+    link_clicks: map['link_click'] || 0,
+    messaging_connections: map['onsite_conversion.total_messaging_connection'] || 0,
+    conversations_started: map['onsite_conversion.messaging_conversation_started_7d'] || 0,
+    first_replies: map['onsite_conversion.messaging_first_reply'] || 0,
+    depth_2: map['onsite_conversion.messaging_user_depth_2_message_send'] || 0,
+    depth_3: map['onsite_conversion.messaging_user_depth_3_message_send'] || 0,
+    depth_5: map['onsite_conversion.messaging_user_depth_5_message_send'] || 0,
+    messaging_orders: map['onsite_conversion.messaging_order_created_v2'] || 0
+  }
+}
+
+/**
+ * Normalizes a single Meta Graph API insight row.
+ */
+export function normalizeInsightRow(item, isCampaignLevel = false) {
+  const row = {
+    date_start: item.date_start || '',
+    date_stop: item.date_stop || '',
+    spend: toFloat(item.spend),
+    impressions: toInt(item.impressions),
+    reach: toInt(item.reach),
+    clicks: toInt(item.clicks),
+    cpc: toFloat(item.cpc),
+    cpm: toFloat(item.cpm),
+    ctr: toFloat(item.ctr),
+    frequency: toFloat(item.frequency),
+    actions: parseActions(item.actions)
+  }
+
+  if (isCampaignLevel) {
+    row.campaign_id = item.campaign_id || ''
+    row.campaign_name = item.campaign_name || ''
+  }
+
+  return row
+}
+
+/**
+ * Generic internal Meta Graph API fetch handler with auth, timeout, and safe error masking.
+ */
+async function fetchMetaGraph(subPath, queryParams = {}, options = {}) {
   const config = getMetaAdsConfig()
 
   const accessToken = options.accessToken !== undefined ? options.accessToken : config.accessToken
@@ -79,8 +139,9 @@ export async function getAdAccountDetails(options = {}) {
   const timeoutMs = typeof options.timeoutMs === 'number' ? options.timeoutMs : (Number(process.env.META_API_TIMEOUT_MS) || 10000)
   const fetchFn = options.fetchFn || globalThis.fetch
 
-  const fields = 'id,name,currency,timezone_name,amount_spent,balance'
-  const url = `${baseUrl}/${apiVersion}/${encodeURIComponent(adAccountId)}?fields=${fields}`
+  const qs = new URLSearchParams(queryParams).toString()
+  const pathPart = subPath ? `/${subPath.replace(/^\/+/, '')}` : ''
+  const url = `${baseUrl}/${apiVersion}/${encodeURIComponent(adAccountId)}${pathPart}${qs ? `?${qs}` : ''}`
 
   let signal
   if (typeof AbortSignal?.timeout === 'function') {
@@ -146,6 +207,19 @@ export async function getAdAccountDetails(options = {}) {
     throw err
   }
 
+  return data
+}
+
+/**
+ * Fetches ad account details from Meta Graph API.
+ */
+export async function getAdAccountDetails(options = {}) {
+  const fields = 'id,name,currency,timezone_name,amount_spent,balance'
+  const data = await fetchMetaGraph('', { fields }, options)
+
+  const config = getMetaAdsConfig()
+  const adAccountId = options.adAccountId || config.adAccountId
+
   return {
     id: data.id || adAccountId,
     name: data.name || '',
@@ -155,4 +229,41 @@ export async function getAdAccountDetails(options = {}) {
     amount_spent: data.amount_spent != null ? String(data.amount_spent) : '0',
     balance: data.balance != null ? String(data.balance) : '0'
   }
+}
+
+/**
+ * Fetches daily account-level insights from Meta Graph API.
+ * Default date_preset = 'last_7d', time_increment = 1.
+ */
+export async function getDailyInsights(options = {}) {
+  const datePreset = options.date_preset || 'last_7d'
+  const fields = 'date_start,date_stop,spend,impressions,reach,clicks,cpc,cpm,ctr,frequency,actions'
+  const queryParams = {
+    level: 'account',
+    time_increment: '1',
+    date_preset: datePreset,
+    fields
+  }
+
+  const data = await fetchMetaGraph('insights', queryParams, options)
+  const rows = Array.isArray(data?.data) ? data.data : []
+  return rows.map(r => normalizeInsightRow(r, false))
+}
+
+/**
+ * Fetches campaign-level insights from Meta Graph API.
+ * Default date_preset = 'last_7d'.
+ */
+export async function getCampaignInsights(options = {}) {
+  const datePreset = options.date_preset || 'last_7d'
+  const fields = 'campaign_id,campaign_name,date_start,date_stop,spend,impressions,reach,clicks,cpc,cpm,ctr,frequency,actions'
+  const queryParams = {
+    level: 'campaign',
+    date_preset: datePreset,
+    fields
+  }
+
+  const data = await fetchMetaGraph('insights', queryParams, options)
+  const rows = Array.isArray(data?.data) ? data.data : []
+  return rows.map(r => normalizeInsightRow(r, true))
 }

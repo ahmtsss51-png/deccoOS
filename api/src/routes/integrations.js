@@ -17,7 +17,12 @@ import {
   queryPaytrTransactionReport
 } from '../services/paytr.js'
 import { isSystemOpen } from '../opening-guard.js'
-import { getAdAccountDetails, getMetaAdsConfig } from '../services/meta-ads.js'
+import {
+  getAdAccountDetails,
+  getDailyInsights,
+  getCampaignInsights,
+  getMetaAdsConfig
+} from '../services/meta-ads.js'
 
 export { parseDecimalToCents }
 
@@ -3886,6 +3891,58 @@ router.get('/meta-ads/account', async (req, res) => {
     return res.status(200).json({
       ok: true,
       account
+    })
+  } catch (err) {
+    const status = err.status || 500
+    return res.status(status).json({
+      ok: false,
+      code: err.code || 'META_API_ERROR',
+      error: err.message || 'Meta API hatası'
+    })
+  }
+})
+
+/**
+ * GET /meta-ads/insights/daily
+ * Read-only daily account-level insights.
+ * Query params: date_preset (default: 'last_7d')
+ * Strictly zero DB mutations.
+ */
+router.get('/meta-ads/insights/daily', async (req, res) => {
+  try {
+    const datePreset = typeof req.query.date_preset === 'string' && req.query.date_preset.trim()
+      ? req.query.date_preset.trim()
+      : 'last_7d'
+    const data = await getDailyInsights({ date_preset: datePreset })
+    return res.status(200).json({
+      ok: true,
+      data
+    })
+  } catch (err) {
+    const status = err.status || 500
+    return res.status(status).json({
+      ok: false,
+      code: err.code || 'META_API_ERROR',
+      error: err.message || 'Meta API hatası'
+    })
+  }
+})
+
+/**
+ * GET /meta-ads/insights/campaigns
+ * Read-only campaign-level insights.
+ * Query params: date_preset (default: 'last_7d')
+ * Strictly zero DB mutations.
+ */
+router.get('/meta-ads/insights/campaigns', async (req, res) => {
+  try {
+    const datePreset = typeof req.query.date_preset === 'string' && req.query.date_preset.trim()
+      ? req.query.date_preset.trim()
+      : 'last_7d'
+    const data = await getCampaignInsights({ date_preset: datePreset })
+    return res.status(200).json({
+      ok: true,
+      data
     })
   } catch (err) {
     const status = err.status || 500

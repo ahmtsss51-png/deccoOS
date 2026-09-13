@@ -20,7 +20,11 @@ import { pool, query } from './db.js'
 import {
   getMetaAdsConfig,
   sanitizeErrorMessage,
-  getAdAccountDetails
+  getAdAccountDetails,
+  getDailyInsights,
+  getCampaignInsights,
+  parseActions,
+  normalizeInsightRow
 } from './services/meta-ads.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme-in-production'
@@ -164,7 +168,7 @@ async function runTests() {
 
     assert.ok(capturedUrl.includes('/v26.0/'), 'URL must use v26.0 default API version')
     assert.ok(capturedUrl.includes('act_1015849284729102'), 'URL must contain act_ formatted account ID')
-    assert.ok(capturedUrl.includes('fields=id,name,currency,timezone_name,amount_spent,balance'), 'URL must request required fields')
+    assert.ok(decodeURIComponent(capturedUrl).includes('fields=id,name,currency,timezone_name,amount_spent,balance'), 'URL must request required fields')
     assert.equal(capturedHeaders.Authorization, 'Bearer MOCK_TOKEN_TEST', 'Authorization header must pass Bearer token')
 
     assert.equal(details.id, 'act_1015849284729102')
@@ -339,6 +343,363 @@ async function runTests() {
       if (origEnvToken !== undefined) process.env.META_ACCESS_TOKEN = origEnvToken
       else delete process.env.META_ACCESS_TOKEN
       if (origEnvAccount !== undefined) process.env.META_AD_ACCOUNT_ID = origEnvAccount
+      else delete process.env.META_AD_ACCOUNT_ID
+    }
+
+    // =========================================================================
+    // TEST 9: parseActions Mapping & Missing Action Handling (META-04)
+    // =========================================================================
+    console.log('\n[Test 9] Testing parseActions mapping, missing actions = 0, and strict exposure...')
+
+    const rawActionsSample = [
+      { action_type: 'link_click', value: '42' },
+      { action_type: 'onsite_conversion.total_messaging_connection', value: '15' },
+      { action_type: 'onsite_conversion.messaging_conversation_started_7d', value: '12' },
+      { action_type: 'onsite_conversion.messaging_first_reply', value: '9' },
+      { action_type: 'onsite_conversion.messaging_user_depth_2_message_send', value: '7' },
+      { action_type: 'onsite_conversion.messaging_user_depth_3_message_send', value: '4' },
+      { action_type: 'onsite_conversion.messaging_user_depth_5_message_send', value: '2' },
+      { action_type: 'onsite_conversion.messaging_order_created_v2', value: '3' },
+      // Unrelated actions that must NOT be exposed:
+      { action_type: 'comment', value: '10' },
+      { action_type: 'post_reaction', value: '55' }
+    ]
+
+    const parsed = parseActions(rawActionsSample)
+    assert.equal(parsed.link_clicks, 42)
+    assert.equal(parsed.messaging_connections, 15)
+    assert.equal(parsed.conversations_started, 12)
+    assert.equal(parsed.first_replies, 9)
+    assert.equal(parsed.depth_2, 7)
+    assert.equal(parsed.depth_3, 4)
+    assert.equal(parsed.depth_5, 2)
+    assert.equal(parsed.messaging_orders, 3)
+
+    // Verify only the 8 requested action keys exist
+    const exposedKeys = Object.keys(parsed)
+    assert.equal(exposedKeys.length, 8)
+    assert.deepEqual(exposedKeys.sort(), [
+      'conversations_started',
+      'depth_2',
+      'depth_3',
+      'depth_5',
+      'first_replies',
+      'link_clicks',
+      'messaging_connections',
+      'messaging_orders'
+    ].sort())
+
+    // Partial actions -> missing action = 0
+    const partialParsed = parseActions([
+      { action_type: 'link_click', value: '5' }
+    ])
+    assert.equal(partialParsed.link_clicks, 5)
+    assert.equal(partialParsed.messaging_connections, 0)
+    assert.equal(partialParsed.conversations_started, 0)
+    assert.equal(partialParsed.first_replies, 0)
+    assert.equal(partialParsed.depth_2, 0)
+    assert.equal(partialParsed.depth_3, 0)
+    assert.equal(partialParsed.depth_5, 0)
+    assert.equal(partialParsed.messaging_orders, 0)
+
+    // Empty / null actions -> all 0
+    const emptyParsed = parseActions(null)
+    assert.equal(emptyParsed.link_clicks, 0)
+    assert.equal(emptyParsed.messaging_orders, 0)
+
+    console.log('✓ Test 9 passed: Actions mapped strictly to 8 exposed fields; missing actions default to 0.')
+
+    // =========================================================================
+    // TEST 10: normalizeInsightRow Number Normalization & Separation of clicks vs link_clicks
+    // =========================================================================
+    console.log('\n[Test 10] Testing number normalization and clicks vs link_clicks separation...')
+
+    const rawInsight = {
+      date_start: '2026-09-06',
+      date_stop: '2026-09-06',
+      spend: '345.67',
+      impressions: '4500',
+      reach: '3800',
+      clicks: '98', // Total clicks on ad
+      cpc: '3.527245',
+      cpm: '76.815556',
+      ctr: '2.177778',
+      frequency: '1.184211',
+      actions: [
+        { action_type: 'link_click', value: '45' } // link_clicks separate from clicks
+      ]
+    }
+
+    const normAccount = normalizeInsightRow(rawInsight, false)
+    assert.equal(normAccount.date_start, '2026-09-06')
+    assert.equal(normAccount.date_stop, '2026-09-06')
+    assert.equal(typeof normAccount.spend, 'number')
+    assert.equal(normAccount.spend, 345.67)
+    assert.equal(typeof normAccount.impressions, 'number')
+    assert.equal(normAccount.impressions, 4500)
+    assert.equal(typeof normAccount.reach, 'number')
+    assert.equal(normAccount.reach, 3800)
+    assert.equal(typeof normAccount.clicks, 'number')
+    assert.equal(normAccount.clicks, 98, 'clicks must come from raw clicks (98)')
+    assert.equal(typeof normAccount.cpc, 'number')
+    assert.equal(normAccount.cpc, 3.527245)
+    assert.equal(typeof normAccount.cpm, 'number')
+    assert.equal(normAccount.cpm, 76.815556)
+    assert.equal(typeof normAccount.ctr, 'number')
+    assert.equal(normAccount.ctr, 2.177778)
+    assert.equal(typeof normAccount.frequency, 'number')
+    assert.equal(normAccount.frequency, 1.184211)
+    assert.equal(normAccount.actions.link_clicks, 45, 'actions.link_clicks must be 45')
+    assert.notEqual(normAccount.clicks, normAccount.actions.link_clicks, 'clicks and link_clicks must remain separate')
+    assert.equal(normAccount.campaign_id, undefined)
+
+    // Campaign level adds campaign_id and campaign_name
+    const rawCampaignInsight = {
+      ...rawInsight,
+      campaign_id: '1202058491029304',
+      campaign_name: 'Decco Deri Cüzdan Kampanyası'
+    }
+    const normCamp = normalizeInsightRow(rawCampaignInsight, true)
+    assert.equal(normCamp.campaign_id, '1202058491029304')
+    assert.equal(normCamp.campaign_name, 'Decco Deri Cüzdan Kampanyası')
+
+    console.log('✓ Test 10 passed: Numbers normalized, clicks and link_clicks strictly separated.')
+
+    // =========================================================================
+    // TEST 11: getDailyInsights Service Method
+    // =========================================================================
+    console.log('\n[Test 11] Testing getDailyInsights service call with level=account and time_increment=1...')
+
+    let capturedDailyUrl = null
+    const mockDailyFetch = async (url) => {
+      capturedDailyUrl = url
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            {
+              date_start: '2026-09-06',
+              date_stop: '2026-09-06',
+              spend: '150.25',
+              impressions: '1200',
+              reach: '1000',
+              clicks: '35',
+              cpc: '4.29',
+              cpm: '125.20',
+              ctr: '2.92',
+              frequency: '1.2',
+              actions: [{ action_type: 'link_click', value: '20' }]
+            },
+            {
+              date_start: '2026-09-07',
+              date_stop: '2026-09-07',
+              spend: '200.50',
+              impressions: '1600',
+              reach: '1300',
+              clicks: '50',
+              cpc: '4.01',
+              cpm: '125.31',
+              ctr: '3.12',
+              frequency: '1.23',
+              actions: [{ action_type: 'onsite_conversion.messaging_first_reply', value: '5' }]
+            }
+          ]
+        })
+      }
+    }
+
+    const dailyRows = await getDailyInsights({
+      accessToken: 'TEST_TOKEN',
+      adAccountId: '123456789',
+      fetchFn: mockDailyFetch
+    })
+
+    assert.ok(capturedDailyUrl.includes('/insights?'), 'URL must query /insights')
+    assert.ok(capturedDailyUrl.includes('level=account'), 'level must be account')
+    assert.ok(capturedDailyUrl.includes('time_increment=1'), 'time_increment must be 1')
+    assert.ok(capturedDailyUrl.includes('date_preset=last_7d'), 'default date_preset must be last_7d')
+    assert.equal(dailyRows.length, 2)
+    assert.equal(dailyRows[0].date_start, '2026-09-06')
+    assert.equal(dailyRows[0].spend, 150.25)
+    assert.equal(dailyRows[0].actions.link_clicks, 20)
+    assert.equal(dailyRows[0].actions.first_replies, 0)
+    assert.equal(dailyRows[1].actions.first_replies, 5)
+
+    console.log('✓ Test 11 passed: getDailyInsights queries account-level daily breakdown with correct params.')
+
+    // =========================================================================
+    // TEST 12: getCampaignInsights Service Method
+    // =========================================================================
+    console.log('\n[Test 12] Testing getCampaignInsights service call with level=campaign...')
+
+    let capturedCampUrl = null
+    const mockCampFetch = async (url) => {
+      capturedCampUrl = url
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            {
+              campaign_id: '99887766',
+              campaign_name: 'Decco Cüzdan Mart',
+              date_start: '2026-09-01',
+              date_stop: '2026-09-07',
+              spend: '1250.00',
+              impressions: '15000',
+              reach: '11000',
+              clicks: '420',
+              cpc: '2.97',
+              cpm: '83.33',
+              ctr: '2.80',
+              frequency: '1.36',
+              actions: [
+                { action_type: 'link_click', value: '300' },
+                { action_type: 'onsite_conversion.messaging_order_created_v2', value: '14' }
+              ]
+            }
+          ]
+        })
+      }
+    }
+
+    const campRows = await getCampaignInsights({
+      accessToken: 'TEST_TOKEN',
+      adAccountId: '123456789',
+      date_preset: 'last_30d',
+      fetchFn: mockCampFetch
+    })
+
+    assert.ok(capturedCampUrl.includes('level=campaign'), 'level must be campaign')
+    assert.ok(capturedCampUrl.includes('date_preset=last_30d'), 'custom date_preset must be respected')
+    assert.equal(campRows.length, 1)
+    assert.equal(campRows[0].campaign_id, '99887766')
+    assert.equal(campRows[0].campaign_name, 'Decco Cüzdan Mart')
+    assert.equal(campRows[0].spend, 1250)
+    assert.equal(campRows[0].clicks, 420)
+    assert.equal(campRows[0].actions.link_clicks, 300)
+    assert.equal(campRows[0].actions.messaging_orders, 14)
+
+    console.log('✓ Test 12 passed: getCampaignInsights queries campaign-level breakdown with campaign_id and campaign_name.')
+
+    // =========================================================================
+    // TEST 13: HTTP Endpoints for Insights (Daily & Campaigns)
+    // =========================================================================
+    console.log('\n[Test 13] Testing HTTP routes GET /api/integrations/meta-ads/insights/daily and /campaigns...')
+
+    // 13a. Auth required
+    const unauthDaily = await fetch(`${BASE_URL}/integrations/meta-ads/insights/daily`)
+    assert.equal(unauthDaily.status, 401, 'daily insights endpoint must require authentication')
+
+    const unauthCamp = await fetch(`${BASE_URL}/integrations/meta-ads/insights/campaigns`)
+    assert.equal(unauthCamp.status, 401, 'campaigns insights endpoint must require authentication')
+
+    // 13b. Full test scope HTTP endpoints with mocked fetch
+    const insightsTestApp = express()
+    insightsTestApp.use(express.json())
+    const integrationsMod = await import('./routes/integrations.js')
+    insightsTestApp.use('/api/integrations', integrationsMod.default)
+
+    const insightsServer = http.createServer(insightsTestApp)
+    await new Promise(resolve => insightsServer.listen(0, '127.0.0.1', resolve))
+    const insPort = insightsServer.address().port
+
+    const prevToken = process.env.META_ACCESS_TOKEN
+    const prevAccount = process.env.META_AD_ACCOUNT_ID
+    const prevFetch = globalThis.fetch
+
+    try {
+      process.env.META_ACCESS_TOKEN = 'test_token_insights'
+      process.env.META_AD_ACCOUNT_ID = '123456789'
+
+      globalThis.fetch = async (url) => {
+        if (url.includes('level=account')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  date_start: '2026-09-07',
+                  date_stop: '2026-09-07',
+                  spend: '85.50',
+                  impressions: '900',
+                  reach: '750',
+                  clicks: '22',
+                  cpc: '3.88',
+                  cpm: '95.00',
+                  ctr: '2.44',
+                  frequency: '1.2',
+                  actions: [{ action_type: 'link_click', value: '15' }]
+                }
+              ]
+            })
+          }
+        }
+        if (url.includes('level=campaign')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  campaign_id: '55443322',
+                  campaign_name: 'Bahar Kampanyası',
+                  date_start: '2026-09-01',
+                  date_stop: '2026-09-07',
+                  spend: '500.00',
+                  impressions: '6000',
+                  reach: '4800',
+                  clicks: '150',
+                  cpc: '3.33',
+                  cpm: '83.33',
+                  ctr: '2.50',
+                  frequency: '1.25',
+                  actions: [
+                    { action_type: 'link_click', value: '90' },
+                    { action_type: 'onsite_conversion.total_messaging_connection', value: '10' }
+                  ]
+                }
+              ]
+            })
+          }
+        }
+        return prevFetch(url)
+      }
+
+      // Test GET /insights/daily
+      const dailyRes = await fetch(`http://127.0.0.1:${insPort}/api/integrations/meta-ads/insights/daily?date_preset=last_7d`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      const dailyBody = await dailyRes.json()
+      assert.equal(dailyRes.status, 200)
+      assert.equal(dailyBody.ok, true)
+      assert.ok(Array.isArray(dailyBody.data))
+      assert.equal(dailyBody.data.length, 1)
+      assert.equal(dailyBody.data[0].spend, 85.50)
+      assert.equal(dailyBody.data[0].actions.link_clicks, 15)
+
+      // Test GET /insights/campaigns
+      const campRes = await fetch(`http://127.0.0.1:${insPort}/api/integrations/meta-ads/insights/campaigns?date_preset=last_30d`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      const campBody = await campRes.json()
+      assert.equal(campRes.status, 200)
+      assert.equal(campBody.ok, true)
+      assert.ok(Array.isArray(campBody.data))
+      assert.equal(campBody.data.length, 1)
+      assert.equal(campBody.data[0].campaign_id, '55443322')
+      assert.equal(campBody.data[0].campaign_name, 'Bahar Kampanyası')
+      assert.equal(campBody.data[0].actions.messaging_connections, 10)
+
+      console.log('✓ Test 13 passed: Both daily and campaign HTTP endpoints return 200 with normalized insights data.')
+    } finally {
+      globalThis.fetch = prevFetch
+      await new Promise(resolve => insightsServer.close(resolve))
+      if (prevToken !== undefined) process.env.META_ACCESS_TOKEN = prevToken
+      else delete process.env.META_ACCESS_TOKEN
+      if (prevAccount !== undefined) process.env.META_AD_ACCOUNT_ID = prevAccount
       else delete process.env.META_AD_ACCOUNT_ID
     }
 
