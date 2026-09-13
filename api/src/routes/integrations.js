@@ -17,6 +17,7 @@ import {
   queryPaytrTransactionReport
 } from '../services/paytr.js'
 import { isSystemOpen } from '../opening-guard.js'
+import { getAdAccountDetails, getMetaAdsConfig } from '../services/meta-ads.js'
 
 export { parseDecimalToCents }
 
@@ -3867,6 +3868,32 @@ router.post('/whatsapp/messages/:id/link-order', async (req, res, next) => {
     })
   } catch (err) {
     next(err)
+  }
+})
+
+// =========================================================================
+// META ADS INTEGRATION (READ-ONLY FOUNDATION)
+// =========================================================================
+
+/**
+ * GET /meta-ads/account
+ * Read-only ad account details: id, name, currency, timezone, amount_spent, balance.
+ * Strictly zero DB mutations.
+ */
+router.get('/meta-ads/account', async (req, res) => {
+  try {
+    const account = await getAdAccountDetails()
+    return res.status(200).json({
+      ok: true,
+      account
+    })
+  } catch (err) {
+    const status = err.status || 500
+    return res.status(status).json({
+      ok: false,
+      code: err.code || 'META_API_ERROR',
+      error: err.message || 'Meta API hatası'
+    })
   }
 })
 
